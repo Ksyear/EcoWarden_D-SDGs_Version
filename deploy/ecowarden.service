@@ -1,0 +1,67 @@
+[Unit]
+Description=Ecowarden LiDAR Dumping Detection (v5)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ecowarden
+WorkingDirectory=/opt/ecowarden
+ExecStart=/opt/ecowarden/rplidar_app /dev/ttyUSB0 https://api.ecowarden.systems/api/dumping-event 192.168.20.173:5005
+
+# ── 환경 변수 ──────────────────────────────────────────────────────
+#
+# ECOWARDEN_DRY_RUN (v5 [4 POLICY]):
+#   0 = 실전송 모드. 운영 환경은 반드시 0.
+#   1 = 모든 HTTP POST 를 drop 하고 EventNotifier::dropped_count_ 만 증가.
+#       리허설 / 네트워크 미가용 / 벤치마크 전용.
+#
+#   v4 한계 #6 에서 "dry_run 정책 미확정" 으로 남아 있었음 — v5 에서 본
+#   유닛이 0 을 명시하여 정책을 고정한다. 리허설은 별도 유닛 (ecowarden-dry.service)
+#   을 fork 해서 사용할 것.
+Environment=ECOWARDEN_DRY_RUN=0
+
+# ── 비밀값 주입 (ECOWARDEN_API_KEY 등) ─────────────────────────────
+#   API 키는 유닛 파일이나 소스에 직접 쓰지 않는다. 아래 파일에 보관:
+#     sudo install -m 0600 -o root -g root /dev/null /etc/ecowarden/secrets.conf
+#     echo 'ECOWARDEN_API_KEY=<새 키>' | sudo tee /etc/ecowarden/secrets.conf
+#   '-' 접두사: 파일이 없어도 서비스는 기동된다 (레거시 키 fallback + 경고 로그).
+EnvironmentFile=-/etc/ecowarden/secrets.conf
+
+# ECOWARDEN_PROFILE_CSV (v5 [2 PROFILE]):
+#   설정 시 매 프레임 phase latency 를 CSV 로 기록 (p50/p95, KF uncertainty 포함).
+#   기본은 OFF — 장기 운영 시 디스크 IO 부담 때문. 성능 디버깅 필요 시만 enable.
+# Environment=ECOWARDEN_PROFILE_CSV=/var/log/ecowarden/phases.csv
+
+# Servo camera aiming:
+#   Default backend is Arduino over USB serial. Pi sends angles; Arduino drives SG90 PWM.
+Environment=ECOWARDEN_SERVO_ENABLE=1
+Environment=ECOWARDEN_SERVO_BACKEND=arduino
+Environment=ECOWARDEN_SERVO_SERIAL_DEVICE=/dev/ttyACM0
+# Environment=ECOWARDEN_SERVO_MIRROR=1
+
+# 금지구역(존) 침입 탐지 (v50, README §3.7):
+#   설치 방향 기준으로 "버리면 안 되는 지역" 존(0~4)을 지정. 미설정 시 비활성.
+#   서버가 intrusion-event endpoint 미지원이면 NOTIFY=0 (촬영/영상은 유지).
+# Environment=ECOWARDEN_RESTRICTED_ZONES=3,4
+# Environment=ECOWARDEN_INTRUSION_NOTIFY=0
+
+# 블랙박스 전후 N초 영상 (v50, README §3.8). 기본 활성/10초/10fps.
+#   captures/ 아래에 저장되므로 ReadWritePaths 로 이미 허용됨.
+# Environment=ECOWARDEN_BLACKBOX_SEC=10
+# Environment=ECOWARDEN_BLACKBOX_FPS=10
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# 보안 강화 — 필요 없으면 주석 처리
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/ecowarden/captures /var/log/ecowarden
+
+[Install]
+WantedBy=multi-user.target
