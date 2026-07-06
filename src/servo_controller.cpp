@@ -449,7 +449,15 @@ struct ServoController::Impl {
         const std::string annotation =
             "ID:" + std::to_string(track_id) +
             " ZONE:" + std::to_string(zone) + " " + ts + "Z";
-        const std::string saved = camera.CaptureToFilePath(path, annotation);
+        // 머리 위 ID 라벨: 서보는 존 중심각으로 조준하므로, 사람의 실제
+        // 각도와 존 중심각의 차가 화면 중심 대비 수평 offset 이 된다.
+        const double person_deg = SuspectAngleDeg(x_mm, y_mm, params.mirror);
+        const double head_offset_deg =
+            person_deg - params.zone_centers_deg[zone];
+        const double head_distance_mm = std::hypot(x_mm, y_mm);
+        const std::string saved = camera.CaptureToFilePath(
+            path, annotation, "ID:" + std::to_string(track_id),
+            head_offset_deg, head_distance_mm);
         if (!saved.empty()) {
             std::lock_guard<std::mutex> lock(mutex);
             auto it = person_sessions.find(track_id);

@@ -1,9 +1,12 @@
 #pragma once
 
+#include "head_label.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -23,6 +26,20 @@ struct BlackboxParams {
     double   fps          = 10.0;
     int      jpeg_quality = 75;
 };
+
+// ── 블랙박스 클립 메타 — 서버 업로드 시 이벤트 레코드와 연결하는 키 ──
+struct BlackboxClipMeta {
+    std::string event_type;        // "intrusion" | "dumping"
+    uint32_t    person_id = 0;
+    uint32_t    object_id = 0;     // dumping 전용 (0 = 없음)
+    int         zone = -1;
+    int64_t     event_time_ns = 0; // 이벤트 JSON 의 event_time 과 동일 값
+};
+
+// 클립 저장 완료 콜백. 저장 worker 스레드에서 호출되므로 콜백 구현은
+// 스레드 안전해야 한다 (EventNotifier::UploadClip 은 큐 push 만 하므로 안전).
+using BlackboxSavedCallback =
+    std::function<void(const std::string& path, const BlackboxClipMeta& meta)>;
 
 /**
  * @brief 비동기 프레임 캡처를 지원하는 카메라 모듈
@@ -46,6 +63,10 @@ public:
     // 블랙박스 링버퍼 설정 — Start() 전에 호출한다.
     void ConfigureBlackbox(const BlackboxParams& params);
 
+    // 머리 위 ID 라벨 설정 (env 연결 값은 production_params.h 의
+    // DefaultHeadLabelParams() 사용. 미호출 시 기본값으로 동작).
+    void ConfigureHeadLabel(const HeadLabelParams& params);
+
     // 스레드 시작/정지
     bool Start();
     void Stop();
@@ -54,20 +75,32 @@ public:
     std::string CaptureBase64();
     std::string CaptureToFile();
     // annotation 이 비어 있지 않으면 사진 좌상단에 ID/존/시각 배너를 그린다.
+    // head_text 가 비어 있지 않으면 사람 머리 위 추정 위치에 ID 라벨을
+    // 추가로 그린다. head_offset_deg 는 서보 조준각 대비 사람의 수평
+    // 각도 차, head_distance_mm 는 사람까지 거리 (head_label.h 참조).
     std::string CaptureToFilePath(const std::string& path,
-                                  const std::string& annotation = "");
+                                  const std::string& annotation = "",
+                                  const std::string& head_text = "",
+                                  double head_offset_deg = 0.0,
+                                  double head_distance_mm = 0.0);
     bool ShowPreviewFrame(const std::string& window_name, int wait_ms = 1);
 
     /**
      * @brief 이벤트 시점 기준 전 pre초 + 후 post초 구간을 AVI 로 비동기 저장.
+     * @param meta 저장 완료 콜백으로 전달되는 이벤트 연계 정보 (서버 업로드용)
      * @return 저장 worker 가 시작되면 true. 이미 저장 중이거나 블랙박스가
      *         비활성이면 false (scan loop 는 어느 쪽이든 블로킹되지 않음).
      */
-    bool RequestBlackboxSave(const std::string& path);
+    bool RequestBlackboxSave(const std::string& path,
+                             const BlackboxClipMeta& meta = {});
+
+    // 클립 저장 완료 시 호출할 콜백 등록 — Start() 전에 호출한다.
+    void SetBlackboxSavedCallback(BlackboxSavedCallback cb);
 
 private:
     void CaptureLoop();
-    void BlackboxSaveWorker(std::string path, int64_t event_ms);
+    void BlackboxSaveWorker(std::string path, int64_t event_ms,
+                            BlackboxClipMeta meta);
 
     int device_id_;
     std::string capture_dir_;
@@ -88,6 +121,8 @@ private:
         std::vector<unsigned char> jpeg;
     };
     BlackboxParams blackbox_;
+    HeadLabelParams head_label_;
+    BlackboxSavedCallback blackbox_saved_cb_;
     std::mutex blackbox_mutex_;
     std::deque<BlackboxFrame> blackbox_buf_;
     int64_t next_blackbox_ms_ = 0;

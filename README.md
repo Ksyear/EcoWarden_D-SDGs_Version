@@ -1,10 +1,18 @@
-# EcoWarden: 데이터 무결성 보증형 디지털 트윈 관제 플랫폼 (Embedded)
+# EcoWarden: LiDAR 기반 사생활 보호형 스마트 보안 감시 시스템 (Embedded)
 
-RPLiDAR S2와 USB 야간 카메라를 이용한 불법 투기 실시간 탐지 및 증거 보존 시스템의 임베디드 모듈입니다. 10Hz 이상의 고속 LiDAR 스캔과 비동기 카메라 프레임 버퍼링을 결합하여 투기 발생 즉시 증거를 확보하고 서버로 전송합니다.
+사람이 거의 지나다니지 않는 **제한구역**(공공시설 후면, 공용 창고, 하천 관리시설, 설비 보호구역)을 대상으로 하는 보안 감시 시스템의 임베디드 모듈입니다. 평상시에는 카메라를 녹화하지 않고 RPLiDAR S2가 **비식별 좌표만으로** 이동 객체를 추적하다가, 금지구역 침입이 확정되는 순간에만 서보 카메라를 해당 방향으로 조준해 증거(오버레이 사진 + 전후 10초 블랙박스 영상)를 남기고 서버로 전송합니다. 24시간 영상을 상시 저장하는 CCTV 대비 저장공간·사생활 침해·사후 확인 부담을 줄이는 구조입니다.
 
-탐지는 **지능형 다중 센서 융합 알고리즘**(DBSCAN 클러스터링 + 칼만 필터 추적 + 다단계 투기 판정 FSM) 기반입니다. 학습형 신경망 모델은 임베디드에 탑재하지 않으며, 확정 증거 사진이 서버로 전송되므로 서버 측에서 이미지 분류 AI로 2차 검증을 붙이는 확장이 가능합니다.
+핵심 기능:
+
+1. **비식별 통행 추적** — 10Hz LiDAR 점군 → DBSCAN 클러스터링 + 칼만 필터 추적 → Unity 대시보드에 트랙 ID·이동 경로 실시간 표시
+2. **금지구역(존) 침입 감지** — 5-zone 금지구역 정책, 침입 확정 시 `intrusion` 이벤트 + 서보 카메라 자동 조준 촬영 (§3.7)
+3. **증거 보존** — ID/존/UTC시각 오버레이 사진, 이벤트 전후 10초 블랙박스 AVI, FastAPI 전송 + 실패 시 로컬 큐잉 (§3.8)
+4. **확장 기능: 불법 투기 감지** — 다단계 투기 판정 FSM으로 투기 행위 확정·증거화. 금지구역 내 투기는 `severity=high` (§4.6)
+
+탐지는 **지능형 다중 센서 융합 알고리즘**(DBSCAN 클러스터링 + 칼만 필터 추적 + 존 정책 + 다단계 판정 FSM) 기반입니다. 학습형 신경망 모델은 임베디드에 탑재하지 않으며, 확정 증거 사진이 서버로 전송되므로 서버 측에서 사람/동물/불명 분류 AI(카메라 AI)로 2차 검증을 붙이는 확장이 가능합니다 — 고도화 계획은 `보안/전체_구조.md` 참조.
 
 **현재 버전**: v50 — 금지구역(존) 침입 탐지 + 블랙박스 전후 10초 영상 + 증거 사진 ID/존/시각 오버레이 (자세한 변경 이력은 §9 참조)
+**포지셔닝**: 불법 투기 감지 시스템 → **보안 감시 시스템**으로 전환 (2026-07-04). 발표·시나리오·통신 명세는 `보안/` 폴더 참조.
 
 ---
 
@@ -126,7 +134,9 @@ Clean Detection (verified)
 # Unity PC IP가 바뀌었을 때
 ./build/rplidar_app /dev/ttyUSB0 https://api.ecowarden.systems/api/dumping-event 192.168.20.173:5005
 
-# 시각화기 (별도 터미널)
+# 시각화기 (별도 터미널) — 레이더 화면 + 우측 '수신 데이터 값' 패널
+#   d: 데이터 패널 토글, c: 이벤트 로그 클리어, q/ESC: 종료
+#   침입(intrusion) 이벤트 수신 시 해당 존을 빨간 부채꼴로 5초 강조
 python3 lidar_visualizer.py
 ```
 
@@ -167,9 +177,17 @@ rplidar_app ──UDP JSON──→ Unity PC (192.168.20.173:5005)   ← 와이�
 | `ECOWARDEN_INTRUSION_REPEAT_MS` | 기본 `10000` | 같은 사람 침입 재알림 최소 간격 |
 | `ECOWARDEN_INTRUSION_URL` | (자동 유도) | intrusion 이벤트 endpoint. 미설정 시 dumping URL에서 `intrusion-event`로 치환 |
 | `ECOWARDEN_INTRUSION_NOTIFY` | 기본 `1` | `0`이면 침입 이벤트 서버 전송만 끔 (촬영/블랙박스/로그는 유지) |
+| `ECOWARDEN_HEAD_LABEL_ENABLE` | 기본 `1` | 증거 사진의 사람 머리 위 ID 라벨 (§3.6) |
+| `ECOWARDEN_CAMERA_HFOV_DEG` / `ECOWARDEN_CAMERA_VFOV_DEG` | `62` / `38` | 카메라 수평/수직 화각 — 라벨 위치 보정용 |
+| `ECOWARDEN_CAMERA_PITCH_DEG` | 기본 `15` | 카메라 상향 기울기. 15cm 높이 설치에서 얼굴을 찍으려면 위로 기울여야 하며 실측각을 입력 |
+| `ECOWARDEN_CAMERA_HEIGHT_M` / `ECOWARDEN_HEAD_HEIGHT_M` | `0.15` / `1.60` | 카메라 설치 높이 / 가정 머리 높이 |
+| `ECOWARDEN_HEAD_LABEL_IMG_MIRROR` | 기본 `0` | 사진 좌우가 실물과 반대면 `1` |
 | `ECOWARDEN_BLACKBOX_ENABLE` | 기본 `1` | 이벤트 전후 영상 링버퍼 활성 (§3.8) |
 | `ECOWARDEN_BLACKBOX_SEC` | 기본 `10` | 이벤트 전/후 저장 구간(초). `_PRE_SEC`/`_POST_SEC`로 개별 지정 가능 |
 | `ECOWARDEN_BLACKBOX_FPS` | 기본 `10` | 링버퍼 프레임 레이트. 메모리와 트레이드오프 |
+| `ECOWARDEN_CLIP_UPLOAD` | 기본 `1` | 블랙박스 클립 서버 업로드 (§3.8). 서버 `evidence-clip` 준비 전 `0` |
+| `ECOWARDEN_CLIP_URL` | (자동 유도) | 클립 업로드 endpoint. 미설정 시 dumping URL에서 `evidence-clip`으로 치환 |
+| `ECOWARDEN_CLIP_TIMEOUT_MS` | 기본 `120000` | 클립(수십 MB) 전용 업로드 타임아웃 |
 | `ECOWARDEN_API_KEY` | (비밀값) | FastAPI `X-API-Key`. 미설정 시 노출된 레거시 키로 fallback + 경고 로그 |
 | `ECOWARDEN_QUEUE_FILE` | 기본 `/tmp/rplidar_event_queue.jsonl` | 전송 실패 이벤트 큐 파일 경로. 운영 배포는 `/var/lib/ecowarden/` 권장 |
 
@@ -212,9 +230,11 @@ LiDAR USB 연결이 끊겨 스캔이 5회 연속 실패하면 앱이 종료되�
 
 증거 사진(사람 존 촬영·suspect·confirm)에는 좌상단에 `ID:<트랙ID> ZONE:<존> <UTC시각>` 배너가 렌더링된다. 사진이 단독으로 유통돼도 어떤 객체를 언제 어느 존에서 찍었는지 사진만으로 식별할 수 있다.
 
-### 3.7 금지구역(존) 침입 탐지
+**사람 머리 위 ID 라벨 (v53)**: 사람 존 촬영 사진에는 배너와 별도로, 사람 머리 위 추정 위치에 `ID:<트랙ID>` 라벨(초록 박스 + 포인터 라인)이 그려진다. 위치는 LiDAR 좌표로 계산한다 — 수평은 서보 조준각 대비 사람 각도 차, 수직은 거리와 (머리높이−카메라높이)의 고도각에서 카메라 피치를 뺀 값 (`include/head_label.h`). 여러 사람이 프레임에 있어도 어떤 사람이 해당 트랙 ID인지 사진만으로 특정할 수 있다. 라벨이 어긋나면 `ECOWARDEN_CAMERA_PITCH_DEG`(실측 기울기)부터 보정하고, 좌우가 반대면 `ECOWARDEN_HEAD_LABEL_IMG_MIRROR=1`.
 
-"버리면 안 되는 지역"(보호구역·출입 제한 구역)을 존 단위로 지정하면, LiDAR가 추적하는 사람이 해당 존에 들어왔을 때 투기 여부와 무관하게 침입 이벤트를 만든다.
+### 3.7 금지구역(존) 침입 탐지 — 핵심 기능
+
+보안 감시 시스템의 중심 기능이다. 보호구역·출입 제한 구역을 존 단위로 지정하면, LiDAR가 추적하는 사람이 해당 존에 들어왔을 때 투기 여부와 무관하게 침입 이벤트를 만든다.
 
 ```bash
 # 존 3, 4를 금지구역으로 지정 (존 번호는 §3.6의 5-zone과 동일: 0~4)
@@ -225,8 +245,9 @@ sudo env ECOWARDEN_RESTRICTED_ZONES=3,4 ./build/rplidar_app
 
 1. 서보 카메라를 침입자 존으로 즉시 조준·촬영
 2. FastAPI `intrusion-event`로 `person_id`, `zone`, 좌표, 시각, 사진(base64) 전송
-3. `captures/intrusions/`에 블랙박스 영상(전후 10초) 저장
-4. 해당 존에서 투기가 확정되면 dumping 이벤트의 `severity`가 `"high"`로 표기
+3. Unity/시각화기 FRAME `events[]`에 `intrusion` 이벤트 송신 (`severity:"high"`, UDP 손실 대비 5프레임 반복 — v51)
+4. `captures/intrusions/`에 블랙박스 영상(전후 10초) 저장 → 저장 완료 시 서버로 자동 업로드 (`evidence-clip`, v54)
+5. 해당 존에서 투기가 확정되면 dumping 이벤트의 `severity`가 `"high"`로 표기
 
 오탐 방지: 존 경계 각도 노이즈로 1~2프레임 금지 존에 걸치는 경우를 걸러내기 위해 기본 3프레임 연속 관측을 요구하고(`ECOWARDEN_INTRUSION_MIN_FRAMES`), 같은 사람은 기본 10초 간격으로만 재알림한다(`ECOWARDEN_INTRUSION_REPEAT_MS`). 서버가 intrusion endpoint를 아직 지원하지 않으면 `ECOWARDEN_INTRUSION_NOTIFY=0`으로 전송만 끌 수 있다 (촬영·영상·로그는 유지).
 
@@ -239,6 +260,8 @@ sudo env ECOWARDEN_RESTRICTED_ZONES=3,4 ./build/rplidar_app
 - 저장은 별도 worker thread에서 수행되어 10Hz scan loop를 막지 않는다
 - 기본 10초/10fps/JPEG 75 기준 링버퍼 메모리는 1080p에서 약 40~60MB (Pi5 8GB 여유 범위)
 - `ECOWARDEN_BLACKBOX_SEC`(전/후 공통), `_PRE_SEC`/`_POST_SEC`(개별), `_FPS`, `_ENABLE`로 조정
+
+**서버 업로드 (v54)**: 클립 저장이 끝나면 전용 업로드 스레드가 `multipart/form-data`로 FastAPI `evidence-clip` endpoint에 자동 전송한다 (`event_type`/`person_id`/`event_time` 필드로 이벤트 레코드와 연결). 사진(base64)은 이벤트 순간 즉시, 영상은 완성 후(+10초~) 따라가는 2단 구조다. 업로드가 실패해도 파일은 기기에 남고, 서버 준비 전에는 `ECOWARDEN_CLIP_UPLOAD=0`으로 끈다. 형식 상세는 [`보안/통신_명세.md`](보안/통신_명세.md) §4.4.
 
 ---
 
@@ -280,53 +303,25 @@ sudo env ECOWARDEN_RESTRICTED_ZONES=3,4 ./build/rplidar_app
 - **투기 확정**: source track이 PersonGroup에 속하면 group 중심을 기준으로 이탈 거리를 계산. 신규 물체 + source lock + 직접 분리 증거가 있으면 fast confirm 경로 사용
 - **주의**: 신규 다리쌍 생성은 기본 650mm로 제한하되 좁은 leg pair는 Y축 깊이 차이가 500mm 이하일 때 1500mm까지 허용한다. 이미 같은 사람으로 묶인 그룹은 `person_group_rejoin_radius_mm=1500`, `person_group_attach_radius_mm=1600`으로 넓은 보폭을 유지한다
 
-### 4.5 투기 감지 다중 경로 (Multi-Path Dumping Detection)
+### 4.5 금지구역 침입 판정 (Zone Policy) — 핵심 기능
 
-| 경로 | 메커니즘 | 게이트 |
-| :--- | :--- | :--- |
-| **Path 1** | 미매칭 클러스터 ↔ 궤적 이력 근접 | 600mm 이력, 200mm 현재 거리 |
-| **Path 2** | 폭 감소 보조 신호 | 80mm threshold |
-| **Path 3** | 클러스터 분열 보조 신호 | track width + 200mm margin |
-| **Path 4** | 기존 정지 트랙 궤적 매칭 (Phase 6.5) | 궤적 + 보조 1개 |
+- **존 매핑**: 사람 트랙(그룹이면 그룹 대표) 좌표를 서보 조준과 동일한 기준(`SuspectToZone`, atan2)으로 5-zone(0~4)에 매핑 — 카메라 조준과 침입 판정이 항상 같은 존을 가리킴
+- **연속 관측 게이트**: 금지 존에서 `intrusion_min_frames`(기본 3) 연속 관측 시에만 확정 — 존 경계 각도 노이즈(±2~3°)로 1~2프레임 걸치는 오탐 차단
+- **재알림 throttle**: 같은 사람은 `intrusion_repeat_ms`(기본 10초) 간격으로만 재알림, 사라진 사람 상태는 5초 후 자동 정리(`PruneStale`)
+- **침입 확정 시**: ① 서보 즉시 조준·오버레이 사진 ② FastAPI `intrusion-event` ③ Unity/시각화기 `intrusion` 이벤트(UDP 손실 대비 5프레임 반복 전송) ④ 전후 10초 블랙박스 저장
+- 구현: `include/zone_policy.h` (header-only) + `ZP_zone_policy_unit` 단위 테스트
 
-### 4.6 오탐 방지 (False-Positive Guards)
+### 4.6 확장 기능: 투기 감지 (요약)
 
-1. **다리 근접 필터**: 350mm 이내 다른 사람 트랙 → suspect 취소 (source person 제외)
-2. **크기 일관성**: suspect 기간 중 width 분산 > 2500mm² (σ > 50mm) → 취소
-3. **Lost track recovery**: 600mm 이내 + 3 frame lost 이내 → 기존 물체 재등장으로 판단
-4. **Deleted position buffer**: 삭제된 트랙 위치 30 frame 보존
-5. **Hotspot 중복 차단**: 확정 투기 위치 500mm 반경, TTL 3000 frame (~5분)
-6. **활성 투기물 30cm 차단**: 이미 확정된 투기물 근처 재감지 방지
-7. **Birth-time gate**: 오래 있던 정지 물체는 지나가는 사람 궤적으로 suspect 전환 금지
-8. **Source lock**: 생성 시점 source만 확정에 관여, passerby는 확정 근거에서 제외
-9. **Pending cluster quarantine**: 미매칭 클러스터는 일반 3프레임, direct evidence 1프레임 관측 후 track/suspect 공개. 거의 움직이지 않는 정지 잔상은 1프레임 더 보류
-10. **Visible suspect gate**: source lock + 신규 생성 + 직접 증거 + 4프레임 안정 전에는 카메라/Unity suspect callback 보류
-11. **Fast confirm**: 신규 물체 + source lock + 직접 증거 + 300mm 이탈 + 3프레임 거리 증가 + 6프레임 안정이면 빠른 확정
-12. **Strong depart distance**: 600mm 이상도 source lock/birth/direct evidence가 있을 때만 강한 확정 경로로 인정
+침입 감지와 동일한 트래커 위에서 동작하는 확장 기능이다. 4개 탐지 경로(궤적 근접/폭 감소/클러스터 분열/정지 트랙 재매칭)와 12종 오탐 가드(source lock, birth-time gate, hotspot 차단 등)로 투기 행위를 확정하고, 금지구역 내 투기는 `severity="high"`로 전송한다.
 
-### 4.7 현장 튜닝 절차
-
-현장 튜닝은 한 번에 여러 값을 바꾸지 않는다. 아래 순서로 10Hz 로그를 2~3분씩 확인한다.
-
-| 단계 | 증상 | 조정값 | 방향 |
-|------|------|--------|------|
-| 1 | 배경 edge/반사 spike가 계속 track으로 생김 | `static_bg_margin_mm`, `static_bg_min_confidence`, `static_bg_edge_guard_slots` | 기본 150/10/1 유지, 현장 심할 때만 margin 150→180, confidence 10→15, guard 1→2 |
-| 2 | 1~2프레임 튐값이 suspect/capture를 만듦 | `pending_static_extra_frames`, `pending_cluster_confirm_frames`, `min_suspect_callback_frames` | static extra 1→2, pending 3→4, callback 4→5 |
-| 3 | 배경 학습에서 빠진 정적 잔상이 오래 남음 | `ECOWARDEN_BG_RESIDUAL_FILTER_AFTER_FRAMES`, `ECOWARDEN_BG_RESIDUAL_FILTER_RADIUS_MM`, `ECOWARDEN_BG_RESIDUAL_FILTER_MAX_WIDTH_MM` | 기본 40프레임/140mm/350mm, 미탐이면 after 40→60 또는 90 |
-| 4 | 실제 작은 병/봉투 감지가 늦거나 누락 | `fast_confirm_min_frames`, `person_depart_trend_frames`, `source_lost_confirm_frames`, `split_match_radius_mm` | fast 4 유지, trend 4 유지, source lost 8 유지, split match 250 유지 |
-| 5 | 넓은 보폭에서 2명/2객체로 분리 | `person_group_wide_pair_radius_mm`, `person_group_wide_pair_max_depth_gap_mm`, `person_group_attach_radius_mm`, `person_group_rejoin_radius_mm`, `person_group_hold_frames` | 현재 wide radius 1500, Y gap 500, attach 1600, rejoin 1500, hold 14 |
-| 6 | 가까운 두 사람이 한 명으로 병합 | `person_group_new_pair_max_width_mm`, `person_group_attach_radius_mm`, `person_group_rejoin_radius_mm`, `person_group_hold_frames` | new pair 650→600, attach 1200→1100, rejoin 1100→1000, hold 8→7 |
-| 7 | source lost로 오탐 확정 | `source_lost_confirm_frames`, `kf_fallback_max_gate_mm` | source lost 8→12, KF cap 500→400 |
-
-운영 기준:
-
-- 오탐이 많으면 `precision` 값을 먼저 올린다: pending/callback/source_lost/static background 쪽을 강화한다.
-- 실제 투기를 놓치면 `recall` 값을 제한적으로 낮춘다: 확정 프레임/이탈 프레임만 낮추고 source lock/direct evidence는 유지한다.
-- `source_locked`, `newly_created_after_source`, `direct_dump_evidence` 세 조건은 현장 튜닝으로 끄지 않는다. 이 셋을 우회하면 passerby 오탐이 다시 열린다.
+> 탐지 경로·오탐 가드·현장 튜닝 절차·트러블슈팅 이력 전체는 [`docs/투기감지_확장_레퍼런스.md`](docs/투기감지_확장_레퍼런스.md) 참조 (보안 감시 전환 시 본편에서 분리).
 
 ---
 
 ## 5. 데이터 형식 (Data Format)
+
+> **전체 필드 명세는 [`보안/통신_명세.md`](보안/통신_명세.md)가 단일 출처다** — Unity/FastAPI로 보내는 모든 패킷·페이로드의 필드 표, 단위, 이벤트 흐름, 계획(v51) 스키마까지 정리되어 있다. 아래는 요약.
 
 ### Unity 전송 (UDP JSON) — tracked_only 모드
 매 프레임 **추적 확인된 객체만** 전송 (고스트/노이즈 제거):
@@ -358,6 +353,17 @@ sudo env ECOWARDEN_RESTRICTED_ZONES=3,4 ./build/rplidar_app
 - `points` = 빈 배열 (Unity는 트랙 위치만 사용)
 - v10부터 일반 객체는 `confirmed=true`이고 `lost_count=0`인 트랙만 송신됨
 - `suspect` / `dumped` 트랙은 투기 이벤트 흐름 보존을 위해 confirmed 게이트 예외로 송신됨
+- `events[].type` = `"intrusion"`(금지구역 침입, v51) / `"dumping"`(투기 확정) / `"departure"`(퇴장·잔상 제거). intrusion/departure는 UDP 손실 대비 5프레임 반복 전송되므로 Unity는 중복 수신을 무시(멱등 처리)해야 함
+
+금지구역 침입 이벤트 (v51, 보안 감시 핵심):
+```json
+{
+    "type": "intrusion",
+    "person_track_id": 5, "person_x": 1200.0, "person_y": -800.0,
+    "zone": 3, "severity": "high",
+    "timestamp": 1712290800000
+}
+```
 
 ### 시각화기 전송 (UDP JSON) — 전체 모드
 `127.0.0.1:9090`으로 전체 클러스터 + 점구름 전송 (디버그용). objects는 클러스터 인덱스 기반, points는 4:1 샘플링.
@@ -449,30 +455,7 @@ chmod +x setup.sh && ./setup.sh
 
 ### 현장 런타임 튜닝
 
-재컴파일 없이 환경변수로 일부 추적/확정 값을 조정할 수 있습니다. 기본은 v36 값입니다.
-
-```bash
-# 1) 먼저 로그만 켜서 어떤 gate에서 막히는지 확인
-sudo env ECOWARDEN_LOG_LEVEL=dump ./build/rplidar_app
-
-# 2) 보폭 split이 남을 때: 한 번에 하나만 증가
-sudo env ECOWARDEN_PERSON_GROUP_HOLD_FRAMES=16 ./build/rplidar_app
-sudo env ECOWARDEN_PERSON_GROUP_HOLD_ATTACH_RADIUS_MM=1900 ./build/rplidar_app
-sudo env ECOWARDEN_PERSON_GROUP_WIDE_PAIR_RADIUS_MM=1600 ./build/rplidar_app
-
-# 3) 쓰레기 suspect는 되지만 확정이 늦을 때
-sudo env ECOWARDEN_FAST_CONFIRM_MIN_FRAMES=3 ./build/rplidar_app
-sudo env ECOWARDEN_FAST_CONFIRM_DEPART_MM=250 ./build/rplidar_app
-sudo env ECOWARDEN_SOURCE_LOST_CONFIRM_FRAMES=6 ./build/rplidar_app
-
-# 4) 보조 신호가 약해서 suspect 자체가 안 생길 때
-sudo env ECOWARDEN_TRAJECTORY_BIRTH_DEPART_MM=250 ./build/rplidar_app
-
-# 5) 쓰레기와 사람이 한 객체로 붙으면 scan merge부터 낮춤
-sudo env ECOWARDEN_SCAN_MERGE_RADIUS_MM=80 ./build/rplidar_app
-```
-
-오탐이 늘면 위 값을 역순으로 기본값에 가깝게 되돌립니다.
+재컴파일 없이 환경변수로 추적/확정 값을 조정할 수 있다 (기본은 v36 값). 투기 감지 확장 기능의 단계별 튜닝 절차·예시 명령은 [`docs/투기감지_확장_레퍼런스.md`](docs/투기감지_확장_레퍼런스.md) §3~§4 참조.
 
 ### systemd 배포
 ```ini
@@ -538,24 +521,46 @@ ProtectSystem=strict
 
 ## 8. 파일 구조 (File Map)
 
+### 운영 코드 — 보안 감시 시스템이 사용 (`rplidar_app`에 포함)
+
 | 관심사 | 파일 |
 |--------|------|
 | **메인 루프** | `src/main.cpp` (LiDAR + Camera + PIR + 네트워크 통합) |
-| **투기 감지 (추적)** | `src/cluster_tracker.cpp` (7-phase FSM) |
-| **투기 감지 (판정)** | `include/dump_detector.h` (header-only) |
+| **금지구역 침입 판정 (핵심)** | `include/zone_policy.h` (header-only, 5-zone 정책) |
+| **객체 추적 (사람/객체)** | `src/cluster_tracker.cpp` (7-phase FSM) |
 | **칼만 필터** | `include/kalman_filter.h` (header-only) |
 | **LiDAR 인터페이스** | `src/rplidar_s2.cpp` |
-| **클러스터링** | `src/scan_processor.cpp` (DBSCAN + grid) |
+| **클러스터링** | `src/scan_processor.cpp` (DBSCAN + grid), `src/background_filter.cpp` |
 | **파라미터 단일 출처** | `include/production_params.h` |
-| **이벤트 전송** | `src/event_notifier.cpp` (HTTP POST + retry) |
-| **JSON 직렬화** | `src/json_packet.cpp` (UDP JSON 패킷) |
-| **UDP 전송** | `src/udp_sender.cpp` (JSON + 바이너리 프로토콜) |
+| **이벤트 전송 (FastAPI)** | `src/event_notifier.cpp` (HTTP POST + retry + 파일 큐) |
+| **Unity/시각화기 송신** | `src/json_packet.cpp` (UDP JSON — intrusion/dumping/departure), `src/udp_sender.cpp` (바이너리 옵션) |
 | **PIR 센서** | `src/pir_sensor.cpp` (libgpiod + sysfs fallback) |
-| **카메라** | `src/camera_module.cpp` (PIMPL + async) |
+| **카메라 (증거 사진·블랙박스)** | `src/camera_module.cpp` (PIMPL + async) |
 | **서보 카메라 조준** | `src/servo_controller.cpp`, `include/servo_zone.h` |
+| **투기 판정 (확장 기능)** | `include/dump_detector.h` (header-only) |
 | **성능 프로파일** | `include/phase_profiler.h` (CSV) |
-| **회귀 테스트** | `test/sim_main.cpp` (28 scenarios) |
-| **실시간 시각화** | `lidar_visualizer.py` (pygame, UDP 9090) |
+| **배포/설정** | `deploy/ecowarden.service` (systemd), `setup.sh`, `arduino/servo_zone_controller/` |
+
+### 운영 보조 도구 (디버그/점검용)
+
+| 도구 | 용도 |
+|------|------|
+| `lidar_visualizer.py` | 실시간 시각화 + **수신 데이터 값 패널** (`d` 토글, 이벤트 로그 `c` 클리어, 콘솔에 이벤트 JSON 출력) |
+| `test_fastapi.py` | FastAPI 서버 연결 점검 (`python3 test_fastapi.py [intrusion]`) |
+| `check_hardware.sh` | 하드웨어 일괄 점검 |
+
+### 테스트 코드 — 제품 바이너리에 미포함, CMake 타깃이 참조 (삭제 금지)
+
+| 파일 | 타깃 | 검증 대상 |
+|------|------|----------|
+| `test/sim_main.cpp` | `rplidar_sim` | 추적·침입·투기 회귀 시나리오 29종 (§7) |
+| `test/test_camera.cpp` | `check_camera` | USB 카메라 캡처 |
+| `test/test_lidar.cpp` | `check_lidar` | RPLiDAR S2 USB 연결 |
+| `test/test_pir.cpp` | `check_pir` | PIR 센서 GPIO 17/27 |
+| `test/servo_sweep_test.cpp` | `servo_sweep_test` | 서보 5-zone sweep + 촬영 |
+| `test/servo_only_test.cpp` | `servo_only_test` | Pi5 단독 PWM(GPIO18) 진단 |
+
+> 같은 분류가 `.gitignore` 상단 주석에도 기록되어 있다 (생성물·레거시만 git 제외).
 
 ---
 
@@ -575,53 +580,31 @@ ProtectSystem=strict
 
 ### 트러블슈팅 이력
 
-| 오류 | 원인 | 해결 |
-|------|------|------|
-| 시각화기에 데이터 안 보임 | 포트 불일치 (시각화기 9090, 앱은 5005만 전송) | 시각화기 전용 UDP 소켓 추가 (127.0.0.1:9090) |
-| 배경 학습 카운트 0 | Process/Learn 동일 프레임 → 학습 즉시 필터 | Process 먼저, Learn은 다음 프레임용 |
-| 학습 중 5초간 데이터 0 | bg_filter.Apply() false → continue로 전송 건너뜀 | continue 전에 시각화 데이터 전송 추가 |
-| 오탐 (정지 객체 투기 판정) | EvaluateSuspects에서 정지=이탈로 처리 | 사람 트랙 실제 이탈 검증 필수 |
-| 정지 시 ID 변경 | 적응형 배경이 정지 사람을 배경으로 흡수 + lost_age_limit 짧음 | 모든 활성 트랙 위치를 배경 필터에 전달하고, 복구는 `recovery_max_lost_frames` 안에서만 허용 |
-| 투기물 즉시 사라짐 | FilterBackground slack 330mm + 150mm 무조건 삭제가 소형 투기물 제거 | slack 110mm로 축소, 무조건 삭제 제거, 추적 객체 보호 추가 |
-| Unity에 배경 고스트 표시 | 사람 통과 시 배경 점이 1-2프레임 클러스터로 전송됨 | Unity에 tracked_only 모드 도입, 추적 객체만 전송 |
-| 사람 1명이 여러 명으로 깜빡임 | 신규 트랙이 검증 없이 Moving으로 생성되고 Lost 상태 전환 없이 삭제 전까지 송신됨 | Tentative→Confirmed 게이트, lost 일반 트랙 미송신, JSON/바이너리 송신 기준 통일 |
-| 배경/정적 물체가 사람 객체처럼 찍힘 | 현재 프레임의 모든 클러스터 슬롯을 배경 학습에서 차단해 배경으로 재흡수되지 못함 | 클러스터 전체 차단 제거, tracked-object 주변 슬롯만 학습 차단 |
-| 보폭을 벌리면 여전히 2명처럼 보임 | JSON은 group 대표만 보내지만 바이너리 경로가 원본 다리 클러스터를 그대로 송신 | 바이너리도 group synthetic cluster 1개만 송신, PersonGroup hold 추가 |
-| 봉투 투기 후 확정이 안 됨 | 600mm 이탈 필수, 5mm/frame 정지 게이트, 방향성 검사 때문에 봉투 흔들림/짧은 이탈에 막힘 | 450mm+거리 증가 추세 기본 확정, 600mm strong 확정, source lost 경로, 15mm/frame 정지 허용 |
-| 보폭 anti-phase에서 여전히 2명으로 인식 | 양쪽 다리 순간 속도 dot product가 음수이면 group 생성을 거부 | dot hard reject 제거, group 반경 600mm로 확장, 기존 group hold 유지 |
-| 기존 쓰레기 앞을 사람이 지나가면 투기로 확정 | 오래된 정지 객체도 궤적 매칭 + stationary_count로 suspect 전환 가능 | birth-time gate, source lock, 직접 증거 없는 오래된 정지 객체 suspect 금지 |
-| 확정 속도가 느림 | 안정성/이탈을 2단계로 반복 확인 | fast confirm: 신규 물체 + source lock + 직접 증거 + 6프레임 안정으로 빠른 확정 |
-| 배경/반사 때문에 중간중간 값이 튐 | 단일 static background EMA 슬롯과 foreground-only adaptive update가 edge/reflection을 안정적으로 구분하지 못함 | static background confidence/neighbor guard, adaptive two-pass, pending cluster quarantine, visible suspect gate |
-| 넓은 보폭이 아직도 분리되고 확정도 늦음 | group 후보가 confirmed/moving leg에 치우치고 v16 precision gate가 direct evidence까지 지연 | leg-like attach 허용, attach/rejoin 1100/1000mm, hold 7프레임, direct evidence pending 1프레임 |
-| 천천히 걸으면 사람 1명이 2개 객체로 보임 | 저속 다리가 `object_candidate`로 선분류되어 PersonGroup 후보에서 제외됨 | 느린 leg pair 후보 허용, group 확정 시 `object_candidate` 해제 |
-| 중간중간 한 사람 옆에 작은 객체가 같이 보임 | group 없는 `object_candidate`가 Unity JSON `objects/tracks`에 별도 객체로 포함됨 | group 없는 `object_candidate`는 Unity JSON/바이너리 송신에서 제외 |
-| 사람이 탐지 범위를 지나간 뒤 ID가 남음 | v8의 사람 track 수명 3배 확장이 범위 이탈 후에도 ID를 오래 보존 | 이동 사람 lost 수명을 `recovery_max_lost_frames=10`으로 제한, walk_by 종료 시 final_tracks=0 회귀 추가 |
-| PIR Init Failed (RPi5) | RPi5 RP1 GPIO → sysfs 미지원 | libgpiod 1차 + sysfs fallback |
-| `servo_sweep_test`에서 사진만 찍히고 서보가 안 돎 | Arduino sketch 미업로드, `/dev/ttyACM0` 불일치, 또는 공통 GND 누락 | Arduino에 `arduino/servo_zone_controller/servo_zone_controller.ino` 업로드, `ls /dev/ttyACM*`, `ECOWARDEN_SERVO_SERIAL_DEVICE` 확인 |
-| `pip3 install pygame` 실패 | PEP 668 차단 | `sudo apt install -y python3-pygame` |
-
-상세 분석은 `PROJECT_STATE.md` 참조.
+과거 현장 이슈 25건의 원인·해결 기록은 [`docs/투기감지_확장_레퍼런스.md`](docs/투기감지_확장_레퍼런스.md) §5로 이전했다 (보안 감시 전환 시 본편 정리). 버전별 상세 분석은 `PROJECT_STATE.md` 참조.
 
 ---
 
 ## 10. 대전 지역 적용 시나리오 (지속가능발전 연계)
 
-본 시스템은 CCTV 단독 감시의 한계(야간·사각지대 동선 파악 곤란, 상시 영상 촬영에 따른 사생활 침해)를 LiDAR 우선 감시로 보완하는 구조라, 대전 시내의 다음 지점에 그대로 적용할 수 있다.
+본 시스템은 CCTV 단독 감시의 한계(24시간 상시 저장에 따른 저장공간 낭비·사생활 침해, 침입 시점의 사후 확인 부담)를 **LiDAR 우선 감시 + 이벤트 시에만 카메라 증거**로 보완하는 보안 감시 구조다. 유동 인구가 많은 일반 보행로가 아니라, **사람이 들어왔다는 사실 자체가 이벤트인 제한구역**을 대상으로 하므로 판단 기준이 명확하고 오탐 설명이 쉽다.
 
 | 적용 대상 | 활용 방식 |
 |---|---|
-| 국방 관련 시설·공공기관(한국철도공사 본사 등) 주변 보호구역 | 금지구역(존) 침입 탐지(§3.7)로 경계 접근·무단 투기를 동시 감시. 침입 시 `severity=high` 이벤트 + 전후 10초 영상 |
-| 원도심 골목·상습 무단투기 지점 | 5-zone 서보 카메라가 LiDAR 감지 방향만 촬영 — 고정 CCTV 대비 사각지대 없이 저비용 상시 감시 |
-| 갑천·유등천 등 하천변 투기 감시 | 야간 IR 카메라 + LiDAR 조합으로 조명 없는 구간에서도 투기 확정·증거 확보 |
+| 공공기관 외곽 보호구역 (국방 관련 시설, 한국철도공사 본사 등) | 금지구역(존) 침입 탐지(§3.7)로 야간 무단 접근 감시. 침입 시 `intrusion` 이벤트 + 서보 조준 사진 + 전후 10초 영상 |
+| 공용 창고·학교·공원 관리시설 | 운영 시간 외 후면부·출입문 주변 접근 감지 — 시설 훼손·절도 위험 조기 확인 |
+| 갑천·유등천·대전천 주변 하천 관리시설 | 야간 IR 카메라 + LiDAR 조합으로 조명 없는 구간에서도 관리 설비 무단 접근 감시 |
+| 태양광·전기 설비 보호구역 | 외곽 침입·설비 접근 감지로 중요 인프라 보호 |
+| (확장) 원도심 골목·상습 무단투기 지점 | 동일 하드웨어로 투기 감지 모드(§4.6) 운용 — 금지구역 내 투기는 `severity=high` |
 
-대전 지속가능발전목표(D-SDGs, 대전지속가능발전협의회 tjla21.or.kr) 연계:
+대전 지속가능발전목표(D-SDGs, 대전지속가능발전협의회 tjla21.or.kr) 연계
 
 | D-SDGs 목표 | 연계 내용 |
 |---|---|
-| **목표 11 「안전하고 살기좋은 환경 조성」** (주) | 11-4 "도시환경에 미치는 부정적 요소를 감소" — 무단투기 실시간 적발·증거화로 도시환경 저해 요소 저감. 11-3 안전관리 역량 증대 — 보호구역 침입 상시 감시 |
-| **목표 12 「자원의 효율적 생산·소비 추구」** (주) | 12-2 "폐기물 발생의 절대적 감소" / 12-3 재사용·재활용 활성화 — 상습 투기 억제로 올바른 분리배출 유도 |
-| **목표 6 「건강하고 안전한 물관리」** (부) | 3대 하천(갑천·유등천·대전천) 관리·보호 — 하천변 투기 감시로 수질 오염원 차단 |
-| **목표 16 「포용적 제도 구축」** (부) | 위·변조 불가(WORM) 증거 체계로 단속 행정의 투명성·신뢰성 보강 |
+| **목표 11 「안전하고 살기좋은 환경 조성」** (주) | 11-3 안전관리 역량 증대 — 공공시설·보호구역 야간 침입 상시 감시로 지역 안전관리 강화. 11-4 도시환경 부정적 요소 감소 — 확장 기능인 무단투기 적발·증거화 |
+| **목표 16 「포용적 제도 구축」** (주) | 침입 이벤트를 시각·존·좌표·사진·영상과 함께 위·변조 불가(WORM) 체계로 기록 — 관리 행정의 투명성·신뢰성 보강 |
+| **목표 9 「산업혁신과 사회기반시설 확충」** (부) | Raspberry Pi 5 + LiDAR + 엣지 처리 + FastAPI 기반 저비용 스마트 감시 인프라 — 시설 수 확장이 쉬움 |
+| **목표 6 「건강하고 안전한 물관리」** (부) | 3대 하천(갑천·유등천·대전천) 관리시설·수변 안전 설비의 무단 접근 감지로 물관리 인프라 보호 |
 
-- **경제성**: 단속 인력 순찰 대비 저비용 상시 감시 — Raspberry Pi 5 기반 엣지 처리로 서버 부하 최소화
-- **사회적 수용성**: 평상시에는 비식별 LiDAR 점군만으로 감시하고, 투기 의심/침입 시에만 카메라 증거를 남기는 **사생활 보호형 설계**. 투기 없이 사람이 지나가면 임시 사진은 자동 삭제된다(§3.6)
+- **경제성**: 상주 인력·상시 녹화 대비 저비용 — 이벤트 중심 저장으로 저장공간 절감, Pi 5 엣지 처리로 서버 부하 최소화
+- **사회적 수용성**: 평상시에는 비식별 LiDAR 점군만으로 감시하고, 침입/투기 의심 시에만 카메라 증거를 남기는 **사생활 보호형 설계**. 이벤트 없이 사람이 지나가면 임시 사진은 자동 삭제된다(§3.6)
+- 발표 대본·상세 시나리오·통신 명세는 [`보안/`](보안/README.md) 폴더 참조

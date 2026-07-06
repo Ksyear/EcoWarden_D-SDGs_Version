@@ -225,6 +225,20 @@ inline BlackboxParams DefaultBlackboxParams() {
     return bp;
 }
 
+// ── CameraModule: 사람 머리 위 ID 라벨 ──────────────────────────────
+inline HeadLabelParams DefaultHeadLabelParams() {
+    HeadLabelParams hp;
+    hp.enable        = EnvBool("ECOWARDEN_HEAD_LABEL_ENABLE", hp.enable);
+    hp.hfov_deg      = EnvDouble("ECOWARDEN_CAMERA_HFOV_DEG", hp.hfov_deg);
+    hp.vfov_deg      = EnvDouble("ECOWARDEN_CAMERA_VFOV_DEG", hp.vfov_deg);
+    hp.cam_height_m  = EnvDouble("ECOWARDEN_CAMERA_HEIGHT_M", hp.cam_height_m);
+    hp.head_height_m = EnvDouble("ECOWARDEN_HEAD_HEIGHT_M", hp.head_height_m);
+    hp.pitch_deg     = EnvDouble("ECOWARDEN_CAMERA_PITCH_DEG", hp.pitch_deg);
+    hp.image_mirror  = EnvBool("ECOWARDEN_HEAD_LABEL_IMG_MIRROR",
+                               hp.image_mirror);
+    return hp;
+}
+
 // ── ZonePolicy: 금지구역(존) 침입 탐지 ──────────────────────────────
 inline ZonePolicyParams DefaultZonePolicyParams() {
     ZonePolicyParams zp;

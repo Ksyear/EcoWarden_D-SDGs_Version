@@ -85,6 +85,30 @@ EventNotifier::EventNotifier(const NotifierConfig& cfg) : cfg_(cfg) {
         }
     }
 
+    // 증거 영상 클립 업로드 endpoint 결정: env → config → dumping URL 치환 순.
+    if (const char* env = std::getenv("ECOWARDEN_CLIP_URL")) {
+        if (env[0] != '\0') cfg_.clip_url = env;
+    }
+    if (cfg_.clip_url.empty()) {
+        cfg_.clip_url = cfg_.endpoint_url;
+        const std::string from = "dumping-event";
+        const size_t pos = cfg_.clip_url.find(from);
+        if (pos != std::string::npos) {
+            cfg_.clip_url.replace(pos, from.size(), "evidence-clip");
+        }
+    }
+    if (const char* env = std::getenv("ECOWARDEN_CLIP_UPLOAD")) {
+        if (env[0] != '\0') {
+            cfg_.clip_upload =
+                (env[0] == '1' || env[0] == 't' || env[0] == 'T' ||
+                 env[0] == 'y' || env[0] == 'Y');
+        }
+    }
+    if (const char* env = std::getenv("ECOWARDEN_CLIP_TIMEOUT_MS")) {
+        const long v = std::strtol(env, nullptr, 10);
+        if (v > 0) cfg_.clip_timeout_ms = v;
+    }
+
     // dry_run 상태를 시작 시 큰 소리로 알린다. (이전에는 HttpPost가
     // 아무 말 없이 무동작 상태였어서 운영자가 알 수 없었음)
     if (cfg_.dry_run) {
@@ -304,6 +328,134 @@ void EventNotifier::SendIntrusion(const IntrusionEvent& evt,
     EnqueueJson(IntrusionToJson(evt, image_base64), 'I');
 }
 
+// ── 증거 영상 클립 업로드 (multipart, 전용 스레드) ──────────────────
+//
+//   블랙박스 클립은 수십 MB 라 3초 타임아웃의 이벤트 JSON 경로와 분리한다.
+//   실패해도 클립 파일은 기기에 그대로 남으므로 재시도 소진 시 drop 한다
+//   (이벤트 레코드는 이미 사진과 함께 서버에 있음 — 클립은 보강 증거).
+void EventNotifier::UploadClip(const std::string& path,
+                               const BlackboxClipMeta& meta) {
+    if (path.empty()) return;
+    if (!cfg_.clip_upload) {
+        std::fprintf(stderr,
+            "[NOTIFIER] clip 업로드 비활성(ECOWARDEN_CLIP_UPLOAD=0) — "
+            "기기 보관만: %s\n", path.c_str());
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(clip_mutex_);
+        clip_queue_.push(ClipJob{path, meta});
+    }
+
+    // 첫 업로드 요청 시 lazy 시작 (클립을 안 쓰는 구성에서 유휴 스레드 방지)
+    if (!clip_running_.exchange(true)) {
+        clip_thread_ = std::thread(&EventNotifier::ClipLoop, this);
+    }
+    clip_cv_.notify_one();
+}
+
+void EventNotifier::ClipLoop() {
+    while (clip_running_) {
+        ClipJob job;
+        {
+            std::unique_lock<std::mutex> lock(clip_mutex_);
+            clip_cv_.wait(lock, [this] {
+                return !clip_queue_.empty() || !clip_running_;
+            });
+            if (!clip_running_ && clip_queue_.empty()) break;
+            if (clip_queue_.empty()) continue;
+            job = std::move(clip_queue_.front());
+            clip_queue_.pop();
+        }
+
+        bool ok = false;
+        for (uint32_t attempt = 1;
+             attempt <= std::max(cfg_.clip_max_retries, 1u) && clip_running_;
+             ++attempt) {
+            ok = HttpPostClip(job);
+            if (ok) break;
+            std::fprintf(stderr,
+                "[NOTIFIER] clip 업로드 실패 (%u/%u): %s\n",
+                attempt, std::max(cfg_.clip_max_retries, 1u),
+                job.path.c_str());
+            // 재시도 대기 — 종료 요청이 오면 즉시 탈출
+            std::unique_lock<std::mutex> lock(clip_mutex_);
+            clip_cv_.wait_for(lock,
+                std::chrono::seconds(cfg_.retry_interval_sec),
+                [this] { return !clip_running_.load(); });
+        }
+
+        if (ok) {
+            std::fprintf(stderr, "[NOTIFIER] clip 업로드 완료: %s\n",
+                         job.path.c_str());
+        } else {
+            std::fprintf(stderr,
+                "[NOTIFIER] clip 업로드 포기 — 기기 파일 유지: %s\n",
+                job.path.c_str());
+        }
+    }
+}
+
+bool EventNotifier::HttpPostClip(const ClipJob& job) {
+    if (cfg_.dry_run) return false;
+
+    CURL* curl = curl_easy_init();
+    if (!curl) return false;
+
+    curl_mime* mime = curl_mime_init(curl);
+
+    curl_mimepart* file_part = curl_mime_addpart(mime);
+    curl_mime_name(file_part, "file");
+    curl_mime_filedata(file_part, job.path.c_str());
+    curl_mime_type(file_part, "video/x-msvideo");
+
+    const auto add_field = [mime](const char* name, const std::string& value) {
+        curl_mimepart* p = curl_mime_addpart(mime);
+        curl_mime_name(p, name);
+        curl_mime_data(p, value.c_str(), CURL_ZERO_TERMINATED);
+    };
+    add_field("event_type", job.meta.event_type);
+    add_field("person_id", std::to_string(job.meta.person_id));
+    add_field("object_id", std::to_string(job.meta.object_id));
+    add_field("zone", std::to_string(job.meta.zone));
+    add_field("event_time", std::to_string(job.meta.event_time_ns));
+
+    struct curl_slist* headers = nullptr;
+    const std::string api_key_header = "X-API-Key: " + cfg_.api_key;
+    headers = curl_slist_append(headers, api_key_header.c_str());
+    // Content-Type 은 libcurl 이 multipart boundary 포함해 자동 설정한다.
+
+    curl_easy_setopt(curl, CURLOPT_URL, cfg_.clip_url.c_str());
+    curl_easy_setopt(curl, CURLOPT_MIMEPOST, mime);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, cfg_.clip_timeout_ms);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, cfg_.timeout_ms);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteDiscard);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+    const CURLcode res = curl_easy_perform(curl);
+
+    bool success = false;
+    if (res == CURLE_OK) {
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        success = (http_code >= 200 && http_code < 300);
+        if (!success) {
+            std::fprintf(stderr, "[NOTIFIER] clip HTTP %ld (URL: %s)\n",
+                         http_code, cfg_.clip_url.c_str());
+        }
+    } else if (res == CURLE_READ_ERROR) {
+        std::fprintf(stderr, "[NOTIFIER] clip 파일 읽기 실패: %s\n",
+                     job.path.c_str());
+    }
+
+    curl_slist_free_all(headers);
+    curl_mime_free(mime);
+    curl_easy_cleanup(curl);
+    return success;
+}
+
 // ── SendLoop: 전송 전용 스레드 루프 ─────────────────────────────────
 void EventNotifier::SendLoop() {
     while (send_running_) {
@@ -477,6 +629,15 @@ void EventNotifier::StopRetryThread() {
         retry_cv_.notify_all();
         if (retry_thread_.joinable()) {
             retry_thread_.join();
+        }
+    }
+
+    // 클립 업로드 스레드 중지 (UploadClip 첫 호출 시 lazy 시작됨)
+    if (clip_running_) {
+        clip_running_ = false;
+        clip_cv_.notify_all();
+        if (clip_thread_.joinable()) {
+            clip_thread_.join();
         }
     }
 }

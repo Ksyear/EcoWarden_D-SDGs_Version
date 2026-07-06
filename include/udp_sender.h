@@ -31,7 +31,7 @@
  * │ y_mm       (float32)                                   │
  * │ intensity  (uint8)                                     │
  *
- * ── type 0x02: ClusterItem (21 bytes × N) ───────────────
+ * ── type 0x02: ClusterItem (25 bytes × N) ───────────────
  * │ cluster_id   (uint16)                                  │
  * │ centroid_x   (float32)                                 │
  * │ centroid_y   (float32)                                 │
@@ -44,7 +44,7 @@
  *
  * MTU 안전 범위: 패킷 당 최대 1400 bytes payload
  *   → 포인트: (1400-20)/9 = 153 points/packet
- *   → 클러스터: (1400-20)/21 = 65 clusters/packet
+ *   → 클러스터: (1400-20)/25 = 55 clusters/packet
  */
 
 #pragma once

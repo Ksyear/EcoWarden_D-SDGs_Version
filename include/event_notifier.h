@@ -40,6 +40,7 @@
 #include <atomic>
 #include <condition_variable>
 
+#include "camera_module.h"
 #include "cluster_tracker.h"
 #include "zone_policy.h"
 
@@ -56,6 +57,16 @@ struct NotifierConfig {
     // 서버가 intrusion endpoint 를 아직 지원하지 않으면
     // ECOWARDEN_INTRUSION_NOTIFY=0 으로 전송만 끈다 (로그/촬영은 유지).
     bool        intrusion_notify = true;
+    // 증거 영상(블랙박스 클립) 업로드 endpoint. 비어 있으면 endpoint_url 의
+    // "dumping-event" 를 "evidence-clip" 으로 치환해 자동 유도.
+    // ECOWARDEN_CLIP_URL 환경변수로 오버라이드 가능.
+    std::string clip_url        = "";
+    // 서버가 클립 업로드를 아직 지원하지 않으면 ECOWARDEN_CLIP_UPLOAD=0
+    // 으로 업로드만 끈다 (클립 파일은 기기에 계속 저장됨).
+    bool        clip_upload     = true;
+    // 클립(수십 MB) 전용 업로드 타임아웃 — 일반 이벤트 3초와 분리.
+    long        clip_timeout_ms = 120000;
+    uint32_t    clip_max_retries = 3;
     // X-API-Key 값. 비어 있으면 생성자가 ECOWARDEN_API_KEY 환경변수에서 읽는다.
     // 소스에 키를 하드코딩하지 말 것 — 배포 시 systemd EnvironmentFile 로 주입.
     std::string api_key         = "";
@@ -100,6 +111,14 @@ public:
      *        cfg.intrusion_notify=false 면 전송하지 않고 로그만 남긴다.
      */
     void SendIntrusion(const IntrusionEvent& evt, const std::string& image_base64 = "");
+
+    /**
+     * @brief 증거 영상 클립을 비동기 업로드 큐에 넣는다 (논블로킹).
+     *        multipart/form-data 로 clip_url 에 업로드하며, 실패해도
+     *        클립 파일은 기기에 남는다. cfg.clip_upload=false 면 로그만.
+     *        CameraModule::SetBlackboxSavedCallback 과 연결해 사용한다.
+     */
+    void UploadClip(const std::string& path, const BlackboxClipMeta& meta);
 
     /**
      * @brief 큐 파일에 쌓인 이벤트를 모두 재전송한다.
@@ -150,6 +169,17 @@ private:
     std::mutex                  retry_cv_mutex_;
     std::condition_variable     retry_cv_;
 
+    // ── 증거 영상 클립 업로드 큐 (대용량 — 이벤트 JSON 경로와 분리) ──
+    struct ClipJob {
+        std::string      path;
+        BlackboxClipMeta meta;
+    };
+    mutable std::mutex          clip_mutex_;
+    std::queue<ClipJob>         clip_queue_;
+    std::condition_variable     clip_cv_;
+    std::thread                 clip_thread_;
+    std::atomic<bool>           clip_running_{false};
+
     static std::string ToJson(const DepartureEvent& evt);
     static std::string DumpingToJson(const DumpingEvent& evt, const std::string& image_base64,
                                      int zone, bool restricted_zone);
@@ -165,6 +195,8 @@ private:
     const std::string& UrlForTag(char tag) const;
 
     bool HttpPost(const std::string& url, const std::string& json_body);
+    bool HttpPostClip(const ClipJob& job);
+    void ClipLoop();
     void EnqueueJson(const std::string& json, char tag = 'D');
     void SendLoop();
     void AppendToFile(const std::string& json_line);

@@ -96,6 +96,14 @@ void CameraModule::ConfigureBlackbox(const BlackboxParams& params) {
     if (blackbox_.fps <= 0.0) blackbox_.fps = 10.0;
 }
 
+void CameraModule::ConfigureHeadLabel(const HeadLabelParams& params) {
+    head_label_ = params;
+}
+
+void CameraModule::SetBlackboxSavedCallback(BlackboxSavedCallback cb) {
+    blackbox_saved_cb_ = std::move(cb);
+}
+
 bool CameraModule::Start() {
 #ifdef USE_OPENCV
     if (running_) return true;
@@ -183,7 +191,8 @@ void CameraModule::CaptureLoop() {
 #endif
 }
 
-bool CameraModule::RequestBlackboxSave(const std::string& path) {
+bool CameraModule::RequestBlackboxSave(const std::string& path,
+                                       const BlackboxClipMeta& meta) {
 #ifdef USE_OPENCV
     if (!blackbox_.enable || path.empty()) return false;
     if (!running_) return false;
@@ -196,15 +205,17 @@ bool CameraModule::RequestBlackboxSave(const std::string& path) {
     if (blackbox_thread_.joinable()) blackbox_thread_.join(); // 종료된 이전 worker 회수
 
     blackbox_thread_ = std::thread(&CameraModule::BlackboxSaveWorker, this,
-                                   path, NowEpochMs());
+                                   path, NowEpochMs(), meta);
     return true;
 #else
     (void)path;
+    (void)meta;
     return false;
 #endif
 }
 
-void CameraModule::BlackboxSaveWorker(std::string path, int64_t event_ms) {
+void CameraModule::BlackboxSaveWorker(std::string path, int64_t event_ms,
+                                      BlackboxClipMeta meta) {
 #ifdef USE_OPENCV
     const int64_t begin_ms = event_ms -
         static_cast<int64_t>(blackbox_.pre_seconds) * 1000;
@@ -270,10 +281,16 @@ void CameraModule::BlackboxSaveWorker(std::string path, int64_t event_ms) {
     std::cout << "[CAMERA] Blackbox clip saved: " << path
               << " (" << written << " frames, "
               << (end_ms - begin_ms) / 1000 << "s window)\n";
+
+    // 저장 완료 통지 — 서버 업로드 등 후처리는 콜백 쪽 큐에서 비동기 수행.
+    if (written > 0 && blackbox_saved_cb_) {
+        blackbox_saved_cb_(path, meta);
+    }
     blackbox_saving_ = false;
 #else
     (void)path;
     (void)event_ms;
+    (void)meta;
 #endif
 }
 
@@ -336,7 +353,10 @@ std::string CameraModule::CaptureToFile() {
 }
 
 std::string CameraModule::CaptureToFilePath(const std::string& path,
-                                            const std::string& annotation) {
+                                            const std::string& annotation,
+                                            const std::string& head_text,
+                                            double head_offset_deg,
+                                            double head_distance_mm) {
 #ifdef USE_OPENCV
     if (!frame_ready_) {
         std::cerr << "[CAMERA] No frame ready yet.\n";
@@ -370,6 +390,40 @@ std::string CameraModule::CaptureToFilePath(const std::string& path,
                     cv::Scalar(255, 255, 255), kThickness);
     }
 
+    // 사람 머리 위 ID 라벨: LiDAR 좌표 기반 추정 위치에 라벨 + 포인터 라인.
+    if (!head_text.empty()) {
+        int hx = 0;
+        int hy = 0;
+        if (ComputeHeadLabelPos(head_label_, head_offset_deg, head_distance_mm,
+                                frame.cols, frame.rows, &hx, &hy)) {
+            constexpr int kPad = 6;
+            constexpr double kScale = 0.9;
+            constexpr int kThickness = 2;
+            int baseline = 0;
+            const cv::Size sz = cv::getTextSize(
+                head_text, cv::FONT_HERSHEY_SIMPLEX, kScale, kThickness, &baseline);
+            const int box_w = sz.width + kPad * 2;
+            const int box_h = sz.height + baseline + kPad * 2;
+            int left = hx - box_w / 2;
+            int top = hy - box_h;
+            left = std::max(0, std::min(left, frame.cols - box_w));
+            top = std::max(0, std::min(top, frame.rows - box_h));
+            const cv::Rect box(left, top, box_w, box_h);
+            cv::rectangle(frame, box, cv::Scalar(0, 0, 0), cv::FILLED);
+            cv::rectangle(frame, box, cv::Scalar(0, 255, 0), 1);
+            cv::putText(frame, head_text,
+                        cv::Point(box.x + kPad, box.y + kPad + sz.height),
+                        cv::FONT_HERSHEY_SIMPLEX, kScale,
+                        cv::Scalar(0, 255, 0), kThickness);
+            // 라벨 아래 포인터 라인 — 어느 사람을 가리키는지 표시
+            const int line_bottom =
+                std::min(frame.rows - 1, box.y + box_h + 24);
+            cv::line(frame, cv::Point(hx, box.y + box_h),
+                     cv::Point(hx, line_bottom),
+                     cv::Scalar(0, 255, 0), 2);
+        }
+    }
+
     const std::filesystem::path out_path(path);
     if (out_path.has_parent_path()) {
         std::error_code ec;
@@ -384,6 +438,9 @@ std::string CameraModule::CaptureToFilePath(const std::string& path,
 #else
     (void)path;
     (void)annotation;
+    (void)head_text;
+    (void)head_offset_deg;
+    (void)head_distance_mm;
 #endif
     return "";
 }

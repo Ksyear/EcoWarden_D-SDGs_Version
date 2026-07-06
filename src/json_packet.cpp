@@ -52,7 +52,8 @@ std::string JsonPacketSender::Serialize(
     const std::vector<DepartureEvent>& dep_events,
     const std::vector<DumpingEvent>& dump_events,
     uint32_t frame_id,
-    bool tracked_only)
+    bool tracked_only,
+    const std::vector<IntrusionEvent>& intrusion_events)
 {
     uint64_t now = NowMs();
     json j_objects = json::array();
@@ -186,6 +187,17 @@ std::string JsonPacketSender::Serialize(
     }
 
     json j_events = json::array();
+    for (const auto& evt : intrusion_events) {
+        json j_evt;
+        j_evt["type"] = "intrusion";
+        j_evt["person_track_id"] = evt.person_track_id;
+        j_evt["person_x"] = std::round(evt.person_x_mm * 10.0) / 10.0;
+        j_evt["person_y"] = std::round(evt.person_y_mm * 10.0) / 10.0;
+        j_evt["zone"] = evt.zone;
+        j_evt["severity"] = "high";
+        j_evt["timestamp"] = evt.timestamp_ms;
+        j_events.push_back(std::move(j_evt));
+    }
     for (const auto& evt : dump_events) {
         json j_evt;
         j_evt["type"] = "dumping";
@@ -272,7 +284,8 @@ bool JsonPacketSender::Send(const std::vector<Cluster>& clusters,
                             const std::vector<DepartureEvent>& dep_events,
                             const std::vector<DumpingEvent>& dump_events,
                             uint32_t frame_id,
-                            bool tracked_only)
+                            bool tracked_only,
+                            const std::vector<IntrusionEvent>& intrusion_events)
 {
     // departure 재전송: 직전 프레임들에서 발생한 departure 를 이번 패킷에도
     // 포함한다. 신규 departure 는 이번 Serialize 에 이미 들어가므로
@@ -290,7 +303,21 @@ bool JsonPacketSender::Send(const std::vector<Cluster>& clusters,
         pending_departures_.push_back({evt, kDepartureResendFrames - 1});
     }
 
-    std::string payload = Serialize(clusters, tracks, dep_with_pending, dump_events, frame_id, tracked_only);
+    // intrusion 재전송: departure 와 동일한 UDP 손실 흡수 정책.
+    std::vector<IntrusionEvent> intr_with_pending = intrusion_events;
+    for (auto& pi : pending_intrusions_) {
+        intr_with_pending.push_back(pi.evt);
+        pi.remaining--;
+    }
+    pending_intrusions_.erase(
+        std::remove_if(pending_intrusions_.begin(), pending_intrusions_.end(),
+                       [](const PendingIntrusion& pi) { return pi.remaining <= 0; }),
+        pending_intrusions_.end());
+    for (const auto& evt : intrusion_events) {
+        pending_intrusions_.push_back({evt, kIntrusionResendFrames - 1});
+    }
+
+    std::string payload = Serialize(clusters, tracks, dep_with_pending, dump_events, frame_id, tracked_only, intr_with_pending);
     if (payload.size() <= UDP_MAX_DGRAM) {
         if (udp_.SendBuffer(payload.data(), payload.size())) {
             sent_count_++;
