@@ -45,6 +45,7 @@
 
 #include "scan_processor.h"
 #include "cluster_tracker.h"
+#include "zone_policy.h"
 #include "udp_sender.h"
 
 #include <nlohmann/json.hpp>
@@ -75,15 +76,18 @@ public:
      * @return true: 전송 성공
      */
     /**
-     * @param tracked_only  true: 트랙 기반 객체만 전송 (Unity용, 노이즈 제거)
-     *                      false: 전체 클러스터 + 점구름 전송 (시각화기/디버그용)
+     * @param tracked_only      true: 트랙 기반 객체만 전송 (Unity용, 노이즈 제거)
+     *                          false: 전체 클러스터 + 점구름 전송 (시각화기/디버그용)
+     * @param intrusion_events  이번 프레임의 금지구역 침입 이벤트 (보안 감시 핵심).
+     *                          departure 처럼 UDP 손실 대비 5프레임 반복 전송된다.
      */
     bool Send(const std::vector<Cluster>& clusters,
               const std::vector<Track>& tracks,
               const std::vector<DepartureEvent>& dep_events,
               const std::vector<DumpingEvent>& dump_events,
               uint32_t frame_id,
-              bool tracked_only = false);
+              bool tracked_only = false,
+              const std::vector<IntrusionEvent>& intrusion_events = {});
 
     /**
      * @brief 클러스터 + 이벤트를 JSON으로 직렬화만 수행 (전송 없이)
@@ -95,7 +99,8 @@ public:
         const std::vector<DepartureEvent>& dep_events,
         const std::vector<DumpingEvent>& dump_events,
         uint32_t frame_id,
-        bool tracked_only = false
+        bool tracked_only = false,
+        const std::vector<IntrusionEvent>& intrusion_events = {}
     );
 
     size_t GetSentCount()    const { return sent_count_; }
@@ -118,6 +123,16 @@ private:
         int remaining;
     };
     std::vector<PendingDeparture> pending_departures_;
+
+    // intrusion 도 단발 이벤트라 같은 이유로 반복 전송한다. 같은 사람의
+    // 재알림은 ZonePolicy 가 10초 간격으로 throttle 하므로, Unity 는
+    // (person_track_id, timestamp) 중복 수신을 무시하면 된다.
+    static constexpr int kIntrusionResendFrames = 5;
+    struct PendingIntrusion {
+        IntrusionEvent evt;
+        int remaining;
+    };
+    std::vector<PendingIntrusion> pending_intrusions_;
 
     /**
      * @brief epoch ms → ISO 8601 문자열

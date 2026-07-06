@@ -101,6 +101,7 @@ int main(int argc, char *argv[]) {
     const ecowarden::BlackboxParams blackbox_params =
         ecowarden::DefaultBlackboxParams();
     camera.ConfigureBlackbox(blackbox_params);
+    camera.ConfigureHeadLabel(ecowarden::DefaultHeadLabelParams());
     if (!camera.Start()) {
         std::fprintf(stderr, "[ERROR] Camera Start Failed!\n");
     } else if (blackbox_params.enable) {
@@ -138,6 +139,14 @@ int main(int argc, char *argv[]) {
     }
     ecowarden::EventNotifier notifier(nc);
     notifier.StartRetryThread();
+
+    // 블랙박스 클립 저장이 끝나면 서버로 비동기 업로드한다 (사진은 이벤트
+    // 시점에 base64 로 즉시 전송되고, 영상은 완성 후 multipart 로 따라간다).
+    camera.SetBlackboxSavedCallback(
+        [&notifier](const std::string& path,
+                    const ecowarden::BlackboxClipMeta& meta) {
+            notifier.UploadClip(path, meta);
+        });
 
     // 투기 의심(Suspect) 시점에는 scan loop를 막지 않고 서보 worker에 위임한다.
     tracker.SetSuspectCallback([&servo](const ecowarden::DumpingSuspectEvent& evt) {
@@ -186,7 +195,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    std::printf("=== EcoWarden Embedded System Started ===\n");
+    std::printf("=== EcoWarden 보안 감시 시스템 (LiDAR Security Surveillance) Started ===\n");
     std::printf("  Unity  : %s:%u\n", uc.dest_ip.c_str(), uc.dest_port);
     std::printf("  Viz    : %s:%u\n", vc.dest_ip.c_str(), vc.dest_port);
     std::printf("  FastAPI: %s\n", api_url);
@@ -382,6 +391,7 @@ int main(int argc, char *argv[]) {
         // (4) 객체 추적 및 이벤트 감지
         std::vector<ecowarden::DepartureEvent> dep_events;
         std::vector<ecowarden::DumpingEvent> dump_events;
+        std::vector<ecowarden::IntrusionEvent> intrusion_events;
         tracker.Update(clusters, dep_events, dump_events);
         prof.Mark(ecowarden::PhaseProfiler::kTracker);
 
@@ -410,9 +420,16 @@ int main(int argc, char *argv[]) {
                             pid, zone, px, py);
                 servo.OnPersonDetected(pid, px, py); // 카메라 즉시 조준
                 notifier.SendIntrusion(ievt, camera.CaptureBase64());
+                ecowarden::BlackboxClipMeta clip_meta;
+                clip_meta.event_type = "intrusion";
+                clip_meta.person_id = pid;
+                clip_meta.zone = ievt.zone;
+                clip_meta.event_time_ns =
+                    static_cast<int64_t>(ievt.timestamp_ms) * 1000000LL;
                 camera.RequestBlackboxSave(
                     "captures/intrusions/intrusion_" + std::to_string(pid) +
-                    "_" + std::to_string(now_ms) + ".avi");
+                    "_" + std::to_string(now_ms) + ".avi", clip_meta);
+                intrusion_events.push_back(ievt); // Unity/시각화기 침입 경보 표시용
             }
             zone_policy.PruneStale(now_ms);
         }
@@ -447,7 +464,14 @@ int main(int argc, char *argv[]) {
                 blackbox_path = "captures/dumps/blackbox_" +
                     std::to_string(evt.timestamp_ms) + ".avi";
             }
-            camera.RequestBlackboxSave(blackbox_path);
+            ecowarden::BlackboxClipMeta clip_meta;
+            clip_meta.event_type = "dumping";
+            clip_meta.person_id = evt.person_track_id;
+            clip_meta.object_id = evt.object_track_id;
+            clip_meta.zone = dump_zone;
+            clip_meta.event_time_ns =
+                static_cast<int64_t>(evt.timestamp_ms) * 1000000LL;
+            camera.RequestBlackboxSave(blackbox_path, clip_meta);
 
             std::string img_b64 = camera.CaptureBase64();
 
@@ -465,8 +489,8 @@ int main(int argc, char *argv[]) {
         // (6) Unity + 시각화기 데이터 전송 (JSON)
         //   Unity: tracked_only=true → 추적 확인된 객체만 (고스트/노이즈 제거)
         //   시각화기: tracked_only=false → 전체 클러스터 + 점구름 (디버그용)
-        json_sender.Send(clusters, tracker.GetTracks(), dep_events, dump_events, frame_count, true);
-        viz_sender.Send(clusters, tracker.GetTracks(), dep_events, dump_events, frame_count, false);
+        json_sender.Send(clusters, tracker.GetTracks(), dep_events, dump_events, frame_count, true, intrusion_events);
+        viz_sender.Send(clusters, tracker.GetTracks(), dep_events, dump_events, frame_count, false, intrusion_events);
 
         // (6.5) Unity 바이너리 프로토콜 전송
         //   기본 Unity 수신기는 JSON 전용이므로 바이너리는 명시적으로 켰을 때만 보낸다.
