@@ -1321,6 +1321,45 @@ static bool RunDumpValidationUnitTest() {
                "그룹 트랙 근처 잔류 → medium (그룹 매칭 동작)");
     }
 
+    // Case F: 취소 시 투기물 트랙 ID 를 보고하고, 트래커가 플래그를
+    //   되돌릴 수 있어야 한다. 이게 없으면 전송만 막히고 Unity 화면에는
+    //   오탐이 최대 20초(dumped_item_lost_age_limit) 동안 남는다.
+    {
+        ecowarden::DumpValidator dv(p);
+        dv.OnDumpConfirmed(make_evt(51), "", 2, false, false, 700);
+        std::vector<ecowarden::ValidatedDump> out;
+        std::vector<uint32_t> cancelled;
+        for (uint32_t f = 701; f <= 705; f++) {
+            std::vector<ecowarden::Track> tracks;   // 투기물이 사라짐 = 고스트
+            dv.Update(tracks, f, &out, &cancelled);
+        }
+        expect(out.empty(), "고스트는 전송되지 않음");
+        expect(cancelled.size() == 1 && cancelled[0] == 51,
+               "취소된 투기물 ID 를 보고한다");
+
+        // 트래커가 실제로 플래그를 되돌리는지
+        ecowarden::TrackerParams tp;
+        ecowarden::ClusterTracker tracker(tp);
+        expect(!tracker.ClearDumpFlags(51),
+               "없는 트랙 ID 는 false 를 돌려준다");
+    }
+
+    // Case G: 정상 확정은 취소 목록에 들어가면 안 된다.
+    {
+        ecowarden::DumpValidator dv(p);
+        dv.OnDumpConfirmed(make_evt(52), "", 2, false, false, 800);
+        std::vector<ecowarden::ValidatedDump> out;
+        std::vector<uint32_t> cancelled;
+        for (uint32_t f = 801; f <= 805; f++) {
+            std::vector<ecowarden::Track> tracks;
+            tracks.push_back(make_track(52, 1000.0, 2000.0));  // 잔존
+            dv.Update(tracks, f, &out, &cancelled);
+        }
+        expect(out.size() == 1, "잔존 투기물은 전송된다");
+        expect(cancelled.empty(),
+               "정상 확정은 취소 목록에 들어가지 않는다");
+    }
+
     std::printf("─────────────────────────────────────────────────────\n");
     std::printf("SCENARIO: DV_dump_validation_unit (unit test)\n");
     std::printf("─────────────────────────────────────────────────────\n");

@@ -115,8 +115,20 @@ public:
      * @param tracks 현재 프레임의 트랙 목록 (tracker.GetTracks()).
      * @param frame  현재 프레임 번호 (main loop 의 frame_count).
      */
+    /**
+     * @param cancelled_object_ids (선택) 재검증에서 **취소된** 투기물 트랙 ID.
+     *        호출부가 `ClusterTracker::ClearDumpFlags()` 로 되돌려 줘야 한다.
+     *
+     *   왜 여기서 직접 안 고치나: 검증기는 트랙을 소유하지 않는다(const 참조).
+     *   플래그를 되돌리는 책임은 트랙을 소유한 트래커에 둔다.
+     *
+     *   되돌리지 않으면 취소된 오탐이 `is_dumped_item=true` 인 채로 남아
+     *   Unity 화면에 최대 `dumped_item_lost_age_limit`(기본 200프레임 = 20초)
+     *   동안 쓰레기로 계속 표시된다 — 전송만 막고 화면은 못 막는 반쪽 취소.
+     */
     void Update(const std::vector<Track>& tracks, uint32_t frame,
-                std::vector<ValidatedDump>* out) {
+                std::vector<ValidatedDump>* out,
+                std::vector<uint32_t>* cancelled_object_ids = nullptr) {
         for (auto it = pending_.begin(); it != pending_.end();) {
             Pending& pd = *it;
 
@@ -163,6 +175,9 @@ public:
                 std::printf("[DUMP-CANCEL] object %u — 확정 후 %.0fmm 초과"
                             " 이동, 정지 투기물 아님 (오탐 차단)\n",
                             pd.out.evt.object_track_id, params_.max_move_mm);
+                if (cancelled_object_ids) {
+                    cancelled_object_ids->push_back(pd.out.evt.object_track_id);
+                }
                 it = pending_.erase(it);
                 continue;
             }
@@ -193,6 +208,10 @@ public:
                                 " (오탐 차단)\n",
                                 pd.out.evt.object_track_id,
                                 params_.validate_frames, pd.seen);
+                    if (cancelled_object_ids) {
+                        cancelled_object_ids->push_back(
+                            pd.out.evt.object_track_id);
+                    }
                 }
                 it = pending_.erase(it);
                 continue;

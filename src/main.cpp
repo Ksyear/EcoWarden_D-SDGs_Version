@@ -619,7 +619,20 @@ int main(int argc, char *argv[]) {
         std::vector<ecowarden::DumpingEvent> outgoing_dump_events;
         if (dump_validator.Enabled()) {
             std::vector<ecowarden::ValidatedDump> validated;
-            dump_validator.Update(tracker.GetTracks(), frame_count, &validated);
+            std::vector<uint32_t> cancelled;
+            dump_validator.Update(tracker.GetTracks(), frame_count, &validated,
+                                  &cancelled);
+
+            // 취소된 오탐은 투기 플래그를 되돌려 일반 트랙 수명으로 복귀시킨다.
+            //   안 되돌리면 Unity 에 `type:"dumped"` 로 최대 20초간 남는다
+            //   (json_packet 이 is_dumped_item 트랙을 confirmed/lost 게이트에서
+            //    면제하고, 수명도 dumped_item_lost_age_limit 로 늘어나기 때문).
+            for (const uint32_t obj_id : cancelled) {
+                if (tracker.ClearDumpFlags(obj_id)) {
+                    std::printf("  - [DUMP-CANCEL] object %u 투기 플래그 해제 —"
+                                " 일반 트랙으로 복귀\n", obj_id);
+                }
+            }
             for (const auto& v : validated) {
                 notifier.SendDumping(v.evt, v.image_base64, v.zone,
                                      v.in_restricted, v.confidence,
