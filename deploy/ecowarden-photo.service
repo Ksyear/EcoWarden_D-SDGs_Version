@@ -1,0 +1,35 @@
+[Unit]
+Description=EcoWarden Evidence Photo Server (Unity 우회 경로)
+After=network.target
+# rplidar_app 이 captures/ 를 만들므로 함께 뜨는 게 자연스럽다.
+# 단 의존은 걸지 않는다 — 사진 서버가 죽어도 감지는 계속돼야 한다.
+Wants=ecowarden.service
+
+[Service]
+Type=simple
+User=ecowarden
+WorkingDirectory=/opt/ecowarden
+ExecStart=/usr/bin/python3 /opt/ecowarden/pi_photo_server.py --port 8088 --root /opt/ecowarden/captures
+
+# ── 인증 (권장) ────────────────────────────────────────────────────
+#   설정하지 않으면 LAN 에 붙은 누구나 증거 사진을 가져갈 수 있다.
+#   Unity 쪽에도 같은 값을 넣어야 한다 (X-Auth-Token 헤더 또는 ?token=).
+#     openssl rand -hex 16
+#     echo 'ECOWARDEN_PHOTO_TOKEN=<값>' | sudo tee -a /etc/ecowarden/secrets.conf
+EnvironmentFile=-/etc/ecowarden/secrets.conf
+
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+# ── 보안 강화 ──────────────────────────────────────────────────────
+#   captures/ 는 읽기만 하면 되므로 쓰기 권한을 주지 않는다.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/opt/ecowarden/captures
+
+[Install]
+WantedBy=multi-user.target

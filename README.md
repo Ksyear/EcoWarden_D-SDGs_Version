@@ -440,6 +440,38 @@ OpenSSL 없이 빌드하면 vault는 **평문 폴백 없이 비활성**된다 (�
 
 **사람↔동물 겹침 대역 처리**: 15cm 높이에서 중형견 단면(~250mm)과 사람 다리 하나(~150mm)는 2D LiDAR로 구분되지 않는다. 그래서 겹치는 구간은 **동물로 내리지 않는다** — 동물로 잘못 내리면 severity가 `low`로 떨어져 진짜 사람을 놓치기 때문이다. 동물 판정은 ① 사람 최소폭 미만 + 이동 중, ② 보행 속도 상한 초과 + 좁은 단면 — 두 경우만 한다. 회귀 테스트 `OC_object_classifier_unit` Case D3이 이 동작을 고정한다.
 
+### 3.11 증거 사진 HTTP 서버 (`pi_photo_server.py`)
+
+백엔드(FastAPI)가 준비되지 않았을 때 **Unity 가 기기에서 사진을 직접 받아가는 우회 경로**다. 임베디드 C++ 은 관여하지 않는다 — `rplidar_app` 이 `captures/` 에 저장한 JPEG 를 읽어 서빙만 한다. 표준 라이브러리만 쓴다.
+
+```bash
+# rplidar_app 과 같은 작업 디렉터리에서
+python3 pi_photo_server.py                      # 포트 8088, ./captures
+python3 pi_photo_server.py --root /opt/ecowarden/captures --token <값>
+
+# 상시 운영
+sudo cp deploy/ecowarden-photo.service /etc/systemd/system/
+sudo systemctl enable --now ecowarden-photo
+```
+
+| 엔드포인트 | 용도 |
+|---|---|
+| `GET /file/<상대경로>` | `dumping` 이벤트의 `image_file` 로 지목된 **정확한 사진** |
+| `GET /latest.jpg` | 가장 최근 이미지 (`image_file` 이 없을 때 폴백) |
+| `GET /health` | 상태 확인 (파일 개수, 최신 파일, 인증 여부) |
+| `GET /list` | 최근 20개 목록 |
+
+**접근 제한 — 반드시 알아둘 것**
+
+`captures/vault/` 에는 마스킹 **전** 원본의 암호문(`.ewv`)과 **열람 로그**(`access.log`)가 쌓인다. 그래서 이 서버는 두 겹으로 막는다.
+
+1. **`vault/` 디렉터리 전면 차단** — 이미지 확장자여도 403
+2. **이미지 확장자만 서빙** — `.masks.json`, `.avi`, `meta.json` 등은 403
+
+경로 탈출(`../`)도 `commonpath` 로 차단한다.
+
+`--token` (또는 `ECOWARDEN_PHOTO_TOKEN`)을 주면 `X-Auth-Token` 헤더나 `?token=` 을 요구한다. **설정하지 않으면 LAN 에 붙은 누구나 증거 사진을 가져갈 수 있다** — 시연망이라도 켜 두는 편이 낫다.
+
 ---
 
 ## 4. 핵심 알고리즘 (Core Algorithms)
@@ -742,6 +774,7 @@ ProtectSystem=strict
 |------|------|
 | `lidar_visualizer.py` | 실시간 시각화 + **수신 데이터 값 패널** (`d` 토글, 이벤트 로그 `c` 클리어, 콘솔에 이벤트 JSON 출력) |
 | `test_fastapi.py` | FastAPI 서버 연결 점검 (`python3 test_fastapi.py [intrusion]`) |
+| `pi_photo_server.py` | **증거 사진 HTTP 서버** — 백엔드 부재 시 Unity 가 기기에서 사진을 직접 받는 우회 경로 (§3.11) |
 | `check_hardware.sh` | 하드웨어 일괄 점검 |
 
 ### 테스트 코드 — 제품 바이너리에 미포함, CMake 타깃이 참조 (삭제 금지)

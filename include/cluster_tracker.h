@@ -380,6 +380,31 @@ public:
     const std::vector<Track>& GetTracks() const { return tracks_; }
     uint32_t GetFrameCount() const { return frame_count_; }
 
+    /**
+     * @brief 투기 관련 플래그를 되돌려 일반 트랙 수명으로 복귀시킨다.
+     * @return 해당 ID 트랙을 찾아 되돌렸으면 true.
+     *
+     *   v55 재검증이 오탐으로 **취소**한 트랙에 쓴다. 취소했는데 플래그를
+     *   그대로 두면:
+     *     - `json_packet` 이 `is_dumped_item` 트랙을 `confirmed`/`lost_count`
+     *       게이트에서 면제하므로 센서가 놓쳐도 계속 `type:"dumped"` 로 송신
+     *     - 수명이 `dumped_item_lost_age_limit`(기본 200프레임 = 20초)로 늘어남
+     *   → 서버 전송만 막히고 Unity 화면에는 오탐이 20초간 남는다.
+     *
+     *   `source_id` 까지 되돌려야 `IsBackgroundResidualTrack()` 등의
+     *   판정이 정상 트랙과 동일하게 동작한다 (§ 176-204 헬퍼 참조).
+     */
+    bool ClearDumpFlags(uint32_t track_id) {
+        for (auto& tr : tracks_) {
+            if (tr.id != track_id) continue;
+            tr.is_dumped_item  = false;
+            tr.is_dump_suspect = false;
+            tr.source_id       = -1;
+            return true;
+        }
+        return false;
+    }
+
     void SetParams(const TrackerParams& p) { params_ = p; }
 
 private:
