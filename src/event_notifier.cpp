@@ -58,11 +58,13 @@ EventNotifier::EventNotifier(const NotifierConfig& cfg) : cfg_(cfg) {
     }
     if (cfg_.api_key.empty()) {
         std::fprintf(stderr,
-            "[NOTIFIER] ⚠ ECOWARDEN_API_KEY 미설정 — 서버 전송을 비활성화합니다.\n"
-            "[NOTIFIER]   이벤트는 로컬 큐(%s)에만 쌓입니다.\n"
-            "[NOTIFIER]   설정: /etc/ecowarden/secrets.conf 에\n"
-            "[NOTIFIER]         ECOWARDEN_API_KEY=<서버에서 발급한 키>\n",
-            cfg_.queue_file_path.c_str());
+            "[NOTIFIER] 서버 전송 비활성 (ECOWARDEN_API_KEY 미설정)\n"
+            "[NOTIFIER]   → Unity(UDP) 전송은 **정상 동작**합니다. "
+            "감지·촬영·영상 저장도 모두 그대로입니다.\n"
+            "[NOTIFIER]   → HTTP 이벤트는 큐에 쌓지 않고 폐기합니다 "
+            "(보낼 서버가 없으므로).\n"
+            "[NOTIFIER]   백엔드를 붙일 때: /etc/ecowarden/secrets.conf 에 "
+            "ECOWARDEN_API_KEY=<키>\n");
     }
 
     // 큐 파일 경로 환경변수 오버라이드 (/tmp 는 모든 사용자가 읽을 수 있음 —
@@ -402,6 +404,14 @@ void EventNotifier::UploadClip(const std::string& path,
             "기기 보관만: %s\n", path.c_str());
         return;
     }
+    // 키가 없으면 보낼 서버가 없다. 수십 MB 를 3회 재시도해 봐야 시간과
+    // 대역폭만 쓰므로 시도조차 하지 않는다 (파일은 기기에 그대로 남는다).
+    if (cfg_.api_key.empty()) {
+        std::fprintf(stderr,
+            "[NOTIFIER] clip 업로드 생략 (서버 미설정) — 기기 보관만: %s\n",
+            path.c_str());
+        return;
+    }
 
     {
         std::lock_guard<std::mutex> lock(clip_mutex_);
@@ -538,9 +548,16 @@ void EventNotifier::SendLoop() {
         const auto [tag, json] = SplitTagged(line);
         if (HttpPost(UrlForTag(tag), json)) {
             sent_count_++;
-        } else if (cfg_.dry_run) {
-            // dry_run: 전송 시도 자체를 안 한 것이므로 실패/큐잉이 아닌 drop 으로 회계.
+        } else if (cfg_.dry_run || cfg_.api_key.empty()) {
+            // 큐에 쌓지 않고 버린다.
+            //
+            //   큐는 "서버는 있는데 잠깐 안 되는" 상황을 위한 것이다.
+            //   키가 아예 없으면 보낼 곳이 없는 것이므로, 쌓아 봐야
+            //   메모리와 큐 파일만 무한히 늘어난다 (현장 로그에서 75건까지
+            //   증가하며 매 주기 경고를 뿜었다).
+            //   Unity 로 가는 UDP 전송은 이 경로와 무관하게 정상 동작한다.
             dropped_count_++;
+            MaybeWarnNoServer();
         } else {
             fail_count_++;
             {
@@ -558,6 +575,8 @@ void EventNotifier::SendLoop() {
         const auto [tag, json] = SplitTagged(line);
         if (HttpPost(UrlForTag(tag), json)) {
             sent_count_++;
+        } else if (cfg_.dry_run || cfg_.api_key.empty()) {
+            dropped_count_++;   // 보낼 곳이 없으면 종료 시에도 쌓지 않는다
         } else {
             fail_count_++;
             std::lock_guard<std::mutex> flock(fail_queue_mutex_);
@@ -565,6 +584,20 @@ void EventNotifier::SendLoop() {
             AppendToFile(line);
         }
         send_queue_.pop();
+    }
+}
+
+// ── 서버 미설정 안내 (주기적, 스팸 방지) ────────────────────────────
+//
+//   백엔드 없이 Unity 만 쓰는 구성이 정상적인 운용 형태이므로 에러가 아니라
+//   "이런 상태로 돌고 있다" 는 안내로 취급한다. 50건마다 한 번만 찍는다.
+void EventNotifier::MaybeWarnNoServer() {
+    const size_t n = dropped_count_.load();
+    if (n == 1 || n % 50 == 0) {
+        std::fprintf(stderr,
+            "[NOTIFIER] 서버 전송 비활성 — 이벤트 %zu건 폐기 (큐에 쌓지 않음)\n"
+            "[NOTIFIER]   Unity(UDP) 전송은 정상 동작합니다. "
+            "서버로도 보내려면 ECOWARDEN_API_KEY 를 설정하세요.\n", n);
     }
 }
 
