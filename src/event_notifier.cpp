@@ -67,6 +67,9 @@ EventNotifier::EventNotifier(const NotifierConfig& cfg) : cfg_(cfg) {
     if (const char* env = std::getenv("ECOWARDEN_QUEUE_FILE")) {
         if (env[0] != '\0') cfg_.queue_file_path = env;
     }
+    if (const char* env = std::getenv("ECOWARDEN_QUEUE_MAX_AGE_SEC")) {
+        cfg_.queue_max_age_sec = std::strtol(env, nullptr, 10);
+    }
 
     // 금지구역 침입 이벤트 endpoint 결정: env → config → dumping URL 치환 순.
     if (const char* env = std::getenv("ECOWARDEN_INTRUSION_URL")) {
@@ -670,6 +673,46 @@ size_t EventNotifier::FlushQueue() {
     }
 
     if (file_lines.empty()) return 0;
+
+    // 오래된 이벤트 폐기 — 재시작 시 과거 이벤트가 한꺼번에 쏟아지는 것 방지.
+    if (cfg_.queue_max_age_sec > 0) {
+        const int64_t now_ns =
+            static_cast<int64_t>(ecowarden::NowMs()) * 1000000LL;
+        const int64_t max_age_ns =
+            static_cast<int64_t>(cfg_.queue_max_age_sec) * 1000000000LL;
+        size_t expired = 0;
+        std::vector<std::string> fresh;
+        fresh.reserve(file_lines.size());
+        for (const auto& line : file_lines) {
+            const auto [tag, json_str] = SplitTagged(line);
+            int64_t evt_ns = 0;
+            try {
+                const auto j = nlohmann::json::parse(json_str);
+                if (j.contains("event_time") && j["event_time"].is_number()) {
+                    evt_ns = j["event_time"].get<int64_t>();
+                }
+            } catch (...) {
+                evt_ns = 0;   // 파싱 실패 시 나이를 모르므로 보존
+            }
+            if (evt_ns > 0 && now_ns - evt_ns > max_age_ns) {
+                expired++;
+            } else {
+                fresh.push_back(line);
+            }
+        }
+        if (expired > 0) {
+            dropped_count_ += expired;
+            std::fprintf(stderr,
+                "[NOTIFIER] 오래된 이벤트 %zu건 폐기 (%ld초 초과) — "
+                "재시작 시 과거 이벤트 폭주 방지\n",
+                expired, cfg_.queue_max_age_sec);
+        }
+        file_lines.swap(fresh);
+        if (file_lines.empty()) {
+            WriteQueueFile({});
+            return 0;
+        }
+    }
 
     std::sort(file_lines.begin(), file_lines.end());
     file_lines.erase(std::unique(file_lines.begin(), file_lines.end()),

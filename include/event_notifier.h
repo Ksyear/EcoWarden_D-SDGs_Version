@@ -71,6 +71,14 @@ struct NotifierConfig {
     // 소스에 키를 하드코딩하지 말 것 — 배포 시 systemd EnvironmentFile 로 주입.
     std::string api_key         = "";
     std::string queue_file_path = "/tmp/rplidar_event_queue.jsonl";
+
+    // 큐에 남은 이벤트의 최대 나이(초). 이보다 오래된 것은 재전송하지 않고
+    // 버린다. 0 이면 무제한(기존 동작).
+    //
+    //   재시작 시 어제 이벤트가 한꺼번에 쏟아지는 것을 막는다. 시연 중
+    //   파이가 재시작되면 수십~수백 건의 과거 투기가 "방금 일어난 것"처럼
+    //   대시보드에 뜨는데, 증거 시각이 과거라 오히려 혼란만 준다.
+    long        queue_max_age_sec = 3600;   // 1시간
     long        timeout_ms      = 3000;        // HTTP 타임아웃 (ms)
     uint32_t    max_retries     = 3;           // 큐 재전송 시 최대 재시도 횟수
     uint32_t    retry_interval_sec = 10;       // 큐 재전송 주기 (초)
