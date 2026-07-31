@@ -290,6 +290,15 @@ struct TrackerParams {
     double   stationary_track_max_cum_dist_mm = 200.0; // 정지 트랙 궤적 매칭 누적 이동 상한
     double   dump_candidate_max_width_mm   = 900.0;  // 투기 후보 최대 폭
 
+    // 크기 band 별 suspect 확정 요구 프레임.
+    //   작을수록 빨리 확정된다(미탐↓ 오탐↑). 현장에서 "쓰레기를 너무 못
+    //   잡는다" 면 여기를 1~2 낮추는 것이 가장 직접적이다.
+    uint32_t dump_frames_tiny              = 6;
+    uint32_t dump_frames_small             = 6;
+    uint32_t dump_frames_medium            = 5;
+    uint32_t dump_frames_large             = 4;
+    uint32_t dump_frames_xl                = 4;
+
     // ── v13: 15cm 설치 환경 PersonGroup/ObjectCandidate ─────────────
     double   leg_track_max_width_mm        = 300.0;  // 다리 후보 최대 폭
     double   leg_track_min_move_mm         = 20.0;   // 다리 후보 최소 프레임 이동량
