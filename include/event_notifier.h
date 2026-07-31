@@ -208,6 +208,9 @@ private:
     void ClipLoop();
     void EnqueueJson(const std::string& json, char tag = 'D');
     void SendLoop();
+    // 서버 미설정 상태를 주기적으로 안내 (스팸 방지)
+    void MaybeWarnNoServer();
+
     void AppendToFile(const std::string& json_line);
     std::vector<std::string> ReadQueueFile();
     void WriteQueueFile(const std::vector<std::string>& lines);
