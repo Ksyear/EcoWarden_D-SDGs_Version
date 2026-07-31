@@ -102,9 +102,15 @@ public:
      * @param image_base64 (선택) 카메라 모듈이 캡처한 Base64 인코딩 이미지 문자열
      * @param zone (선택) 투기 발생 존(0~4). 음수면 페이로드에서 생략
      * @param restricted_zone true 면 금지구역 내 투기 → severity="high"
+     * @param confidence (선택) 확정 후 재검증 결과("high"/"medium").
+     *        비어 있으면 confidence 관련 필드는 생략 (레거시 페이로드 동일)
+     * @param validated_frames (선택) 재검증 창에서 투기물이 재관측된 프레임 수
+     * @param validate_window (선택) 재검증 창 길이 (프레임)
      */
     void SendDumping(const DumpingEvent& evt, const std::string& image_base64 = "",
-                     int zone = -1, bool restricted_zone = false);
+                     int zone = -1, bool restricted_zone = false,
+                     const std::string& confidence = "",
+                     int validated_frames = -1, int validate_window = -1);
 
     /**
      * @brief 금지구역 침입 이벤트를 비동기 전송 큐에 넣는다 (논블로킹).
@@ -182,7 +188,10 @@ private:
 
     static std::string ToJson(const DepartureEvent& evt);
     static std::string DumpingToJson(const DumpingEvent& evt, const std::string& image_base64,
-                                     int zone, bool restricted_zone);
+                                     int zone, bool restricted_zone,
+                                     const std::string& confidence = "",
+                                     int validated_frames = -1,
+                                     int validate_window = -1);
     static std::string IntrusionToJson(const IntrusionEvent& evt,
                                        const std::string& image_base64);
     static std::string MsToIso8601(uint64_t epoch_ms);
