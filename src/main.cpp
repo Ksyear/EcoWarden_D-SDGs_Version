@@ -22,6 +22,7 @@
 #include "background_filter.h"
 #include "camera_module.h"
 #include "cluster_tracker.h"
+#include "dump_validation.h"
 #include "event_notifier.h"
 #include "json_packet.h"
 #include "phase_profiler.h"
@@ -129,6 +130,21 @@ int main(int argc, char *argv[]) {
                     zone_policy_params.intrusion_repeat_ms);
     }
 
+    // ── 3.6. 투기 확정 재검증 (오탐 차단) ───────────────────────────
+    //   확정된 투기물이 실제로 현장에 남아 있는지 N프레임 재관찰 후에만
+    //   서버 전송/Unity 표시. 고스트·반사·잔상 오탐을 전송 전에 걸러낸다.
+    //   ECOWARDEN_DUMP_VALIDATE=0 으로 끄면 기존처럼 확정 즉시 전송.
+    const ecowarden::DumpValidationParams dump_validation_params =
+        ecowarden::DefaultDumpValidationParams();
+    ecowarden::DumpValidator dump_validator(dump_validation_params);
+    if (dump_validator.Enabled()) {
+        std::printf("[DUMP-VERIFY] 확정 후 재검증 활성: %u프레임 잔존 확인"
+                    " (이동 %.0fmm 초과 또는 재관측 %.0f%% 미만이면 취소)\n",
+                    dump_validation_params.validate_frames,
+                    dump_validation_params.max_move_mm,
+                    dump_validation_params.min_present_ratio * 100.0);
+    }
+
     // ── 4. 출력 및 네트워크 설정 ─────────────────────────────────────
     ecowarden::NotifierConfig nc;
     nc.endpoint_url = api_url;
@@ -195,7 +211,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    std::printf("=== EcoWarden 보안 감시 시스템 (LiDAR Security Surveillance) Started ===\n");
+    std::printf("=== EcoWarden 불법 투기 감지 시스템 (LiDAR Illegal Dumping Detection) Started ===\n");
     std::printf("  Unity  : %s:%u\n", uc.dest_ip.c_str(), uc.dest_port);
     std::printf("  Viz    : %s:%u\n", vc.dest_ip.c_str(), vc.dest_port);
     std::printf("  FastAPI: %s\n", api_url);
@@ -477,11 +493,41 @@ int main(int argc, char *argv[]) {
 
             std::printf("  - Photo: %s (PIR: %s)\n", img_path.empty() ? "FAILED" : img_path.c_str(), motion ? "YES" : "NO");
 
-            notifier.SendDumping(evt, img_b64, dump_zone, in_restricted);
+            if (dump_validator.Enabled()) {
+                // 증거(서보 번들/사진/블랙박스)는 위에서 이미 확보했다.
+                // 서버 전송과 Unity 표시만 재검증 통과 후로 미룬다 — (5.5).
+                dump_validator.OnDumpConfirmed(evt, img_b64, dump_zone,
+                                               in_restricted, motion,
+                                               frame_count);
+                std::printf("  - [DUMP-VERIFY] object %u 재검증 시작 —"
+                            " %u프레임 잔존 확인 후 전송\n",
+                            evt.object_track_id,
+                            dump_validation_params.validate_frames);
+            } else {
+                notifier.SendDumping(evt, img_b64, dump_zone, in_restricted);
+            }
         }
 
         for (const auto& evt : dep_events) {
             notifier.Send(evt);
+        }
+
+        // (5.5) 투기 확정 재검증 — 투기물이 실제 잔존한 확정만 서버 전송 +
+        //   Unity `dumping` 이벤트로 내보낸다. 고스트/반사는 [DUMP-CANCEL]
+        //   로그만 남고 전송되지 않는다 (로컬 증거 파일은 유지).
+        std::vector<ecowarden::DumpingEvent> outgoing_dump_events;
+        if (dump_validator.Enabled()) {
+            std::vector<ecowarden::ValidatedDump> validated;
+            dump_validator.Update(tracker.GetTracks(), frame_count, &validated);
+            for (const auto& v : validated) {
+                notifier.SendDumping(v.evt, v.image_base64, v.zone,
+                                     v.in_restricted, v.confidence,
+                                     static_cast<int>(v.observed_frames),
+                                     static_cast<int>(v.window_frames));
+                outgoing_dump_events.push_back(v.evt);
+            }
+        } else {
+            outgoing_dump_events = dump_events;
         }
 
         prof.Mark(ecowarden::PhaseProfiler::kEvents);
@@ -489,8 +535,9 @@ int main(int argc, char *argv[]) {
         // (6) Unity + 시각화기 데이터 전송 (JSON)
         //   Unity: tracked_only=true → 추적 확인된 객체만 (고스트/노이즈 제거)
         //   시각화기: tracked_only=false → 전체 클러스터 + 점구름 (디버그용)
-        json_sender.Send(clusters, tracker.GetTracks(), dep_events, dump_events, frame_count, true, intrusion_events);
-        viz_sender.Send(clusters, tracker.GetTracks(), dep_events, dump_events, frame_count, false, intrusion_events);
+        //   dumping 이벤트는 재검증 통과분(outgoing_dump_events)만 내보낸다.
+        json_sender.Send(clusters, tracker.GetTracks(), dep_events, outgoing_dump_events, frame_count, true, intrusion_events);
+        viz_sender.Send(clusters, tracker.GetTracks(), dep_events, outgoing_dump_events, frame_count, false, intrusion_events);
 
         // (6.5) Unity 바이너리 프로토콜 전송
         //   기본 Unity 수신기는 JSON 전용이므로 바이너리는 명시적으로 켰을 때만 보낸다.

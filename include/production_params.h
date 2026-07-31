@@ -19,6 +19,7 @@
 #include "background_filter.h"
 #include "camera_module.h"
 #include "cluster_tracker.h"
+#include "dump_validation.h"
 #include "servo_controller.h"
 #include "zone_policy.h"
 
@@ -251,6 +252,23 @@ inline ZonePolicyParams DefaultZonePolicyParams() {
     zp.forget_after_ms = EnvU32("ECOWARDEN_INTRUSION_FORGET_MS",
                                 zp.forget_after_ms);
     return zp;
+}
+
+// ── DumpValidator: 투기 확정 후 재검증 (오탐 차단) ──────────────────
+inline DumpValidationParams DefaultDumpValidationParams() {
+    DumpValidationParams dv;
+    dv.enable = EnvBool("ECOWARDEN_DUMP_VALIDATE", dv.enable);
+    dv.validate_frames = EnvU32("ECOWARDEN_DUMP_VALIDATE_FRAMES",
+                                dv.validate_frames);
+    dv.max_move_mm = EnvDouble("ECOWARDEN_DUMP_VALIDATE_MAX_MOVE_MM",
+                               dv.max_move_mm);
+    dv.min_present_ratio = EnvDouble("ECOWARDEN_DUMP_VALIDATE_MIN_PRESENT",
+                                     dv.min_present_ratio);
+    dv.high_present_ratio = EnvDouble("ECOWARDEN_DUMP_VALIDATE_HIGH_PRESENT",
+                                      dv.high_present_ratio);
+    dv.source_departed_mm = EnvDouble("ECOWARDEN_DUMP_VALIDATE_DEPART_MM",
+                                      dv.source_departed_mm);
+    return dv;
 }
 
 } // namespace ecowarden

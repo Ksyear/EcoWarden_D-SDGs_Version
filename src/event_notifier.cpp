@@ -175,7 +175,9 @@ std::string EventNotifier::ToJson(const DepartureEvent& evt) {
 
 // ── DumpingEvent → JSON (API SPEC: eco-warden backend) ──────────────
 std::string EventNotifier::DumpingToJson(const DumpingEvent& evt, const std::string& image_base64,
-                                         int zone, bool restricted_zone) {
+                                         int zone, bool restricted_zone,
+                                         const std::string& confidence,
+                                         int validated_frames, int validate_window) {
     nlohmann::json j;
 
     j["person_id"]       = static_cast<int>(evt.person_track_id);
@@ -195,6 +197,16 @@ std::string EventNotifier::DumpingToJson(const DumpingEvent& evt, const std::str
     if (zone >= 0) {
         j["zone"]     = zone;
         j["severity"] = restricted_zone ? "high" : "normal";
+    }
+
+    // 확정 후 재검증 결과 (dump_validation.h) — additive 필드라 서버가
+    // 무시해도 무방. confidence 비어 있으면 레거시 페이로드와 동일.
+    if (!confidence.empty()) {
+        j["confidence"] = confidence;
+        if (validated_frames >= 0 && validate_window > 0) {
+            j["validated_frames"] = validated_frames;
+            j["validate_window"]  = validate_window;
+        }
     }
 
     if (!image_base64.empty()) {
@@ -312,8 +324,11 @@ void EventNotifier::Send(const DepartureEvent& evt) {
 }
 
 void EventNotifier::SendDumping(const DumpingEvent& evt, const std::string& image_base64,
-                                int zone, bool restricted_zone) {
-    EnqueueJson(DumpingToJson(evt, image_base64, zone, restricted_zone));
+                                int zone, bool restricted_zone,
+                                const std::string& confidence,
+                                int validated_frames, int validate_window) {
+    EnqueueJson(DumpingToJson(evt, image_base64, zone, restricted_zone,
+                              confidence, validated_frames, validate_window));
 }
 
 void EventNotifier::SendIntrusion(const IntrusionEvent& evt,

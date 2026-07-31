@@ -51,6 +51,7 @@
 
 #include "background_filter.h"
 #include "cluster_tracker.h"
+#include "dump_validation.h"
 #include "phase_profiler.h"
 #include "production_params.h"
 #include "scan_processor.h"
@@ -1182,6 +1183,148 @@ static bool RunZonePolicyUnitTest() {
     return ok;
 }
 
+// ════════════════════════════════════════════════════════════════════
+//   DumpValidator 단위 테스트 (투기 확정 후 재검증)
+// ════════════════════════════════════════════════════════════════════
+//   LiDAR 파이프라인과 독립인 순수 로직이라 합성 scene 없이 직접 검증한다.
+
+static bool RunDumpValidationUnitTest() {
+    bool ok = true;
+    auto expect = [&ok](bool cond, const char* what) {
+        if (!cond) {
+            std::printf("  dump_validation: FAIL — %s\n", what);
+            ok = false;
+        }
+    };
+
+    ecowarden::DumpValidationParams p;
+    p.enable             = true;
+    p.validate_frames    = 5;
+    p.max_move_mm        = 300.0;
+    p.min_present_ratio  = 0.5;
+    p.high_present_ratio = 0.8;
+    p.source_departed_mm = 1200.0;
+
+    auto make_evt = [](uint32_t obj_id) {
+        ecowarden::DumpingEvent evt{};
+        evt.person_track_id = 1;
+        evt.person_x_mm     = 900.0;
+        evt.person_y_mm     = 2000.0;
+        evt.object_track_id = obj_id;
+        evt.object_x_mm     = 1000.0;
+        evt.object_y_mm     = 2000.0;
+        evt.timestamp_ms    = 12345;
+        return evt;
+    };
+    auto make_track = [](uint32_t id, double x, double y) {
+        ecowarden::Track t{};
+        t.id   = id;
+        t.x_mm = x;
+        t.y_mm = y;
+        return t;
+    };
+
+    // Case A: 진짜 투기 — 투기물 잔존 + 투기자 이탈 → confidence=high.
+    {
+        ecowarden::DumpValidator dv(p);
+        expect(dv.Enabled(), "enable=true 시 Enabled");
+        dv.OnDumpConfirmed(make_evt(42), "img", 2, false, true, 100);
+        expect(dv.PendingCount() == 1, "확정 후 pending 1건");
+        // 같은 object 중복 확정은 무시된다.
+        dv.OnDumpConfirmed(make_evt(42), "img", 2, false, true, 100);
+        expect(dv.PendingCount() == 1, "중복 확정 무시");
+
+        std::vector<ecowarden::ValidatedDump> out;
+        for (uint32_t f = 101; f <= 105; f++) {
+            std::vector<ecowarden::Track> tracks;
+            tracks.push_back(make_track(42, 1000.0, 2000.0));     // 투기물 잔존
+            tracks.push_back(make_track(1, 900.0 + f * 500.0,
+                                        2000.0));                  // 투기자 이탈
+            dv.Update(tracks, f, &out);
+        }
+        expect(out.size() == 1, "관찰 종료 후 검증 통과 1건");
+        if (out.size() == 1) {
+            expect(std::strcmp(out[0].confidence, "high") == 0,
+                   "잔존+이탈 → confidence=high");
+            expect(out[0].observed_frames == 5 && out[0].window_frames == 5,
+                   "재관측 프레임 집계");
+            expect(out[0].source_departed, "source 이탈 플래그");
+            expect(out[0].evt.object_track_id == 42 &&
+                   out[0].zone == 2 && out[0].pir_motion,
+                   "원본 이벤트/컨텍스트 보존");
+        }
+        expect(dv.PendingCount() == 0, "통과 후 pending 비움");
+    }
+
+    // Case B: 고스트/반사 — 투기물이 사라짐 → 취소 (전송 없음).
+    {
+        ecowarden::DumpValidator dv(p);
+        dv.OnDumpConfirmed(make_evt(43), "", 1, false, false, 200);
+        std::vector<ecowarden::ValidatedDump> out;
+        for (uint32_t f = 201; f <= 205; f++) {
+            std::vector<ecowarden::Track> tracks;  // 투기물 트랙 없음
+            dv.Update(tracks, f, &out);
+        }
+        expect(out.empty(), "고스트는 취소되어 전송 없음");
+        expect(dv.PendingCount() == 0, "취소 후 pending 비움");
+    }
+
+    // Case C: 확정 후 이동 — 정지 투기물이 아님 → 즉시 취소.
+    {
+        ecowarden::DumpValidator dv(p);
+        dv.OnDumpConfirmed(make_evt(44), "", 0, false, false, 300);
+        std::vector<ecowarden::ValidatedDump> out;
+        std::vector<ecowarden::Track> tracks;
+        tracks.push_back(make_track(44, 1600.0, 2000.0));  // 600mm 이동
+        dv.Update(tracks, 301, &out);
+        expect(out.empty() && dv.PendingCount() == 0,
+               "300mm 초과 이동 시 즉시 취소");
+    }
+
+    // Case D: 잔존은 충분하나 투기자가 근처에 남음 → confidence=medium.
+    {
+        ecowarden::DumpValidator dv(p);
+        dv.OnDumpConfirmed(make_evt(45), "", 3, true, false, 400);
+        std::vector<ecowarden::ValidatedDump> out;
+        for (uint32_t f = 401; f <= 405; f++) {
+            std::vector<ecowarden::Track> tracks;
+            tracks.push_back(make_track(45, 1000.0, 2000.0));  // 잔존
+            tracks.push_back(make_track(1, 900.0, 2000.0));    // 근처 잔류
+            dv.Update(tracks, f, &out);
+        }
+        expect(out.size() == 1, "잔존 확인 시 통과");
+        if (out.size() == 1) {
+            expect(std::strcmp(out[0].confidence, "medium") == 0,
+                   "source 잔류 → confidence=medium");
+            expect(out[0].in_restricted, "금지구역 플래그 보존");
+        }
+    }
+
+    // Case E: person_track_id 가 그룹 ID 인 경우도 이탈 판정된다 (v33).
+    {
+        ecowarden::DumpValidator dv(p);
+        dv.OnDumpConfirmed(make_evt(46), "", 2, false, false, 500);
+        std::vector<ecowarden::ValidatedDump> out;
+        for (uint32_t f = 501; f <= 505; f++) {
+            std::vector<ecowarden::Track> tracks;
+            tracks.push_back(make_track(46, 1000.0, 2000.0));
+            ecowarden::Track leg = make_track(77, 900.0, 2000.0);
+            leg.person_group_id = 1;  // 그룹 ID = person_track_id
+            tracks.push_back(leg);
+            dv.Update(tracks, f, &out);
+        }
+        expect(out.size() == 1 &&
+               std::strcmp(out[0].confidence, "medium") == 0,
+               "그룹 트랙 근처 잔류 → medium (그룹 매칭 동작)");
+    }
+
+    std::printf("─────────────────────────────────────────────────────\n");
+    std::printf("SCENARIO: DV_dump_validation_unit (unit test)\n");
+    std::printf("─────────────────────────────────────────────────────\n");
+    std::printf("RESULT: %s\n\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace sim
 
 // ════════════════════════════════════════════════════════════════════
@@ -1202,7 +1345,7 @@ int main(int argc, char* argv[]) {
 
     std::printf("\n");
     std::printf("╔════════════════════════════════════════════════════╗\n");
-    std::printf("║   sim regression suite (v50) — 29 tests             ║\n");
+    std::printf("║   sim regression suite (v55) — 30 tests             ║\n");
     std::printf("║   production_params.h 단일 출처 사용                 ║\n");
     std::printf("╚════════════════════════════════════════════════════╝\n\n");
 
@@ -1240,6 +1383,18 @@ int main(int argc, char* argv[]) {
         } else {
             n_fail++;
             std::printf("  - ZP_zone_policy_unit: unit assertions failed\n");
+        }
+    }
+
+    // 투기 확정 재검증 단위 테스트 — LiDAR scene 과 독립
+    if (g_running &&
+        (!only || std::strstr("DV_dump_validation_unit", only) != nullptr)) {
+        n_run++;
+        if (sim::RunDumpValidationUnitTest()) {
+            n_pass++;
+        } else {
+            n_fail++;
+            std::printf("  - DV_dump_validation_unit: unit assertions failed\n");
         }
     }
 
