@@ -3,6 +3,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 
@@ -247,8 +249,12 @@ void CameraModule::Stop() {
     if (capture_thread_.joinable()) {
         capture_thread_.join();
     }
-    if (blackbox_thread_.joinable()) {
-        blackbox_thread_.join();
+    {
+        std::lock_guard<std::mutex> lock(blackbox_thread_mutex_);
+        for (auto& th : blackbox_threads_) {
+            if (th.joinable()) th.join();
+        }
+        blackbox_threads_.clear();
     }
 #ifdef USE_OPENCV
     if (impl_ && impl_->cap.isOpened()) {
@@ -314,15 +320,33 @@ bool CameraModule::RequestBlackboxSave(const std::string& path,
     if (!blackbox_.enable || path.empty()) return false;
     if (!running_) return false;
 
-    if (blackbox_saving_.exchange(true)) {
-        std::cerr << "[CAMERA] Blackbox save already in progress — skipped: "
-                  << path << "\n";
+    const uint32_t cap = std::max(1u, blackbox_.max_concurrent_saves);
+    uint32_t cur = blackbox_active_.load();
+    while (cur < cap &&
+           !blackbox_active_.compare_exchange_weak(cur, cur + 1)) {
+        // CAS 재시도 — cur 는 실패 시 최신값으로 갱신된다
+    }
+    if (cur >= cap) {
+        std::cerr << "[CAMERA] Blackbox 동시 저장 한도(" << cap
+                  << ") 초과 — skipped: " << path << "\n"
+                  << "[CAMERA]   ECOWARDEN_BLACKBOX_MAX_CONCURRENT 로 늘리거나"
+                     " BLACKBOX_POST_SEC 를 줄이세요\n";
         return false;
     }
-    if (blackbox_thread_.joinable()) blackbox_thread_.join(); // 종료된 이전 worker 회수
 
-    blackbox_thread_ = std::thread(&CameraModule::BlackboxSaveWorker, this,
-                                   path, NowEpochMs(), meta);
+    {
+        std::lock_guard<std::mutex> lock(blackbox_thread_mutex_);
+        // 벡터가 무한히 늘지 않도록, 활성 저장이 없을 때 한 번에 회수한다.
+        // (활성 카운터가 0 이면 모든 worker 가 이미 종료된 상태다)
+        if (blackbox_active_.load() <= 1 && !blackbox_threads_.empty()) {
+            for (auto& th : blackbox_threads_) {
+                if (th.joinable()) th.join();
+            }
+            blackbox_threads_.clear();
+        }
+        blackbox_threads_.emplace_back(&CameraModule::BlackboxSaveWorker, this,
+                                       path, NowEpochMs(), meta);
+    }
     return true;
 #else
     (void)path;
@@ -359,7 +383,7 @@ void CameraModule::BlackboxSaveWorker(std::string path, int64_t event_ms,
 
     if (frames.empty()) {
         std::cerr << "[CAMERA] Blackbox save failed: no buffered frames\n";
-        blackbox_saving_ = false;
+        blackbox_active_--;
         return;
     }
 
@@ -372,7 +396,7 @@ void CameraModule::BlackboxSaveWorker(std::string path, int64_t event_ms,
     cv::Mat first = cv::imdecode(frames.front().jpeg, cv::IMREAD_COLOR);
     if (first.empty()) {
         std::cerr << "[CAMERA] Blackbox save failed: decode error\n";
-        blackbox_saving_ = false;
+        blackbox_active_--;
         return;
     }
 
@@ -395,17 +419,40 @@ void CameraModule::BlackboxSaveWorker(std::string path, int64_t event_ms,
         if (!pr.safe_to_emit) {
             std::cerr << "[FACEMASK] fail-closed — 마스킹 불가로 블랙박스 영상 "
                          "저장을 건너뜁니다 (" << path << ")\n";
-            blackbox_saving_ = false;
+            blackbox_active_--;
             return;
         }
     }
 
+    // 실측 프레임률로 기록한다.
+    //
+    //   링버퍼는 blackbox_.fps(기본 10) 간격으로 넣으려 하지만, 1080p USB
+    //   카메라가 그 속도를 못 내면 실제로는 더 적게 쌓인다. 현장 로그에서
+    //   20초 창에 76프레임(≈3.8fps)만 모인 사례가 있었다. 그걸 10fps 로
+    //   기록하면 영상이 **2.6배 빨리 재생**되어 증거로서 시간 감각이 깨진다.
+    //   따라서 실제 수집된 프레임 수와 실제 시간 폭으로 fps 를 계산한다.
+    double actual_fps = blackbox_.fps;
+    if (frames.size() >= 2) {
+        const double span_sec =
+            (frames.back().ts_ms - frames.front().ts_ms) / 1000.0;
+        if (span_sec > 0.5) {
+            actual_fps = static_cast<double>(frames.size() - 1) / span_sec;
+        }
+    }
+    // 극단값 방어 (플레이어가 못 여는 fps 방지)
+    actual_fps = std::max(1.0, std::min(actual_fps, 60.0));
+    if (std::abs(actual_fps - blackbox_.fps) > 0.5) {
+        std::cout << "[CAMERA] 실측 " << actual_fps << "fps 로 기록 (설정 "
+                  << blackbox_.fps << "fps) — 카메라가 목표 프레임률을 "
+                     "못 내고 있습니다\n";
+    }
+
     cv::VideoWriter writer(path,
                            cv::VideoWriter::fourcc('M', 'J', 'P', 'G'),
-                           blackbox_.fps, first.size());
+                           actual_fps, first.size());
     if (!writer.isOpened()) {
         std::cerr << "[CAMERA] Blackbox save failed: cannot open " << path << "\n";
-        blackbox_saving_ = false;
+        blackbox_active_--;
         return;
     }
 
@@ -440,7 +487,7 @@ void CameraModule::BlackboxSaveWorker(std::string path, int64_t event_ms,
     if (written > 0 && blackbox_saved_cb_) {
         blackbox_saved_cb_(path, meta);
     }
-    blackbox_saving_ = false;
+    blackbox_active_--;
 #else
     (void)path;
     (void)event_ms;

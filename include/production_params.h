@@ -226,6 +226,8 @@ inline BlackboxParams DefaultBlackboxParams() {
     bp.jpeg_quality = static_cast<int>(
         EnvU32("ECOWARDEN_BLACKBOX_JPEG_QUALITY",
                static_cast<uint32_t>(bp.jpeg_quality)));
+    bp.max_concurrent_saves = EnvU32("ECOWARDEN_BLACKBOX_MAX_CONCURRENT",
+                                     bp.max_concurrent_saves);
     return bp;
 }
 

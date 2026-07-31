@@ -646,6 +646,22 @@ size_t EventNotifier::FlushQueue() {
     WriteQueueFile(still_failed);
 
     if (!still_failed.empty()) {
+        // 왜 안 나가는지를 같이 알린다. v56 부터 키가 없으면 전송을 아예
+        // 시도하지 않는데(fail-closed), 그 경고는 시작 시 1회뿐이라
+        // 운영 중에는 "큐만 늘어나고 이유는 모르는" 상태가 된다.
+        if (cfg_.api_key.empty()) {
+            std::fprintf(stderr,
+                "[NOTIFIER] ★ 원인: ECOWARDEN_API_KEY 미설정 — 전송을 시도조차 "
+                "하지 않습니다.\n"
+                "[NOTIFIER]   키를 넣고 재시작하면 큐에 쌓인 이벤트가 함께 "
+                "전송됩니다 (유실 없음).\n"
+                "[NOTIFIER]   echo 'ECOWARDEN_API_KEY=<키>' | "
+                "sudo tee -a /etc/ecowarden/secrets.conf\n");
+        } else if (cfg_.dry_run) {
+            std::fprintf(stderr,
+                "[NOTIFIER] ★ 원인: DRY-RUN 모드입니다 "
+                "(ECOWARDEN_DRY_RUN=0 으로 꺼야 전송됩니다).\n");
+        }
         std::fprintf(stderr, "[NOTIFIER] %zu events still queued after flush\n",
                      still_failed.size());
     }
