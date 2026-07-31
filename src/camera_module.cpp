@@ -104,9 +104,80 @@ void CameraModule::SetBlackboxSavedCallback(BlackboxSavedCallback cb) {
     blackbox_saved_cb_ = std::move(cb);
 }
 
+void CameraModule::ConfigureFaceMask(const FaceMaskParams& params) {
+    face_mask_params_ = params;
+    face_masker_.reset();   // 다음 Start()/사용 시 새 파라미터로 재생성
+}
+
+const char* CameraModule::FaceMaskBackend() const {
+    return face_masker_ ? face_masker_->BackendName() : "none";
+}
+
+void CameraModule::SetEvidenceVault(EvidenceVault* vault) {
+    evidence_vault_ = vault;
+}
+
+// ── 증거 프레임 공통 전처리 (원본 보관 → 마스킹) ────────────────────
+//
+//   순서가 중요하다:
+//     1) 원본을 먼저 vault 에 암호화 저장한다 (마스킹 전 상태여야 3계층의
+//        의미가 있다).
+//     2) 그 다음 얼굴을 마스킹한다.
+//     3) 호출부가 배너·ID 라벨을 그린다 — 마스킹 후여야 라벨이 안 뭉갠다.
+//
+bool CameraModule::PrepareEvidenceFrame(void* frame_mat,
+                                        const std::string& vault_name) {
+#ifdef USE_OPENCV
+    if (frame_mat == nullptr) return false;
+    cv::Mat& frame = *static_cast<cv::Mat*>(frame_mat);
+    if (frame.empty()) return false;
+
+    // ① 원본 암호화 보관 (프라이버시 3계층)
+    if (evidence_vault_ != nullptr && evidence_vault_->Available() &&
+        !vault_name.empty()) {
+        std::vector<uchar> raw;
+        const std::vector<int> q = {cv::IMWRITE_JPEG_QUALITY, 95};
+        if (cv::imencode(".jpg", frame, raw, q)) {
+            const VaultStoreResult vr = evidence_vault_->StoreOriginal(
+                vault_name, raw.data(), raw.size());
+            if (!vr.ok) {
+                std::cerr << "[VAULT] 원본 보관 실패: " << vr.error << "\n";
+            }
+        }
+    }
+
+    // ② 얼굴 마스킹 (프라이버시 2계층)
+    if (!face_masker_) {
+        face_masker_ = std::make_unique<FaceMasker>(face_mask_params_);
+    }
+    const FaceMaskResult mr = face_masker_->Apply(&frame);
+    if (!mr.safe_to_emit) {
+        std::cerr << "[FACEMASK] fail-closed — 마스킹 불가로 증거 사진 저장을 "
+                     "건너뜁니다 (ECOWARDEN_FACE_MASK_FALLBACK=1 로 폴백 허용 "
+                     "또는 ECOWARDEN_FACE_MASK=0 으로 비활성)\n";
+        return false;
+    }
+    if (mr.applied) {
+        std::cout << "[FACEMASK] " << mr.backend << " — 얼굴 " << mr.faces
+                  << "개 마스킹"
+                  << (mr.used_fallback ? " (상단 영역 폴백)" : "") << "\n";
+    }
+    return true;
+#else
+    (void)frame_mat;
+    (void)vault_name;
+    return false;
+#endif
+}
+
 bool CameraModule::Start() {
 #ifdef USE_OPENCV
     if (running_) return true;
+
+    // 얼굴 검출기는 무거우므로 캡처 시작 시 1회만 로드한다.
+    if (!face_masker_) {
+        face_masker_ = std::make_unique<FaceMasker>(face_mask_params_);
+    }
 
     if (!impl_->cap.open(device_id_, cv::CAP_V4L2)) {
         std::cerr << "[CAMERA] Failed to open device " << device_id_ << "\n";
@@ -306,6 +377,15 @@ std::string CameraModule::CaptureBase64() {
 
     if (frame.empty()) return "";
 
+    // 서버로 나가는 이미지다 — 반드시 마스킹을 거친다.
+    {
+        std::ostringstream vn;
+        vn << "b64_" << std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+        if (!PrepareEvidenceFrame(&frame, vn.str())) return "";
+    }
+
     std::vector<uchar> buf;
     std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 80};
     if (!cv::imencode(".jpg", frame, buf, params)) return "";
@@ -343,6 +423,11 @@ std::string CameraModule::CaptureToFile() {
        << "_" << std::setw(3) << std::setfill('0') << ms << ".jpg";
     std::string filename = ss.str();
 
+    if (!PrepareEvidenceFrame(
+            &frame, std::filesystem::path(filename).stem().string())) {
+        return "";
+    }
+
     std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
     if (cv::imwrite(filename, frame, params)) {
         std::cout << "[CAMERA] Async snapshot saved: " << filename << "\n";
@@ -371,6 +456,13 @@ std::string CameraModule::CaptureToFilePath(const std::string& path,
     }
 
     if (frame.empty()) return "";
+
+    // ★ 원본 vault 보관 + 얼굴 마스킹은 배너를 그리기 전에 끝낸다.
+    //   (마스킹을 나중에 하면 ID 라벨까지 블러 처리된다)
+    if (!PrepareEvidenceFrame(&frame,
+                              std::filesystem::path(path).stem().string())) {
+        return "";
+    }
 
     // 증거 사진 배너: 사진만 단독 유통돼도 트랙 ID/존/시각을 식별할 수 있게 한다.
     if (!annotation.empty()) {

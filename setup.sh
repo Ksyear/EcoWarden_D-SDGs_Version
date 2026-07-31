@@ -34,6 +34,7 @@ sudo apt-get install -y \
     libcurl4-openssl-dev \
     libgpiod-dev \
     libopencv-dev \
+    libssl-dev \
     nlohmann-json3-dev \
     pkg-config \
     python3 \
@@ -41,6 +42,32 @@ sudo apt-get install -y \
     python3-pygame \
     python3-venv \
     v4l-utils
+
+# ── 얼굴 마스킹용 Haar cascade 확인 (프라이버시 2계층) ──────────────
+#   libopencv-dev 가 함께 설치하지만, 배포판에 따라 경로가 다르거나
+#   빠지는 경우가 있어 명시적으로 점검하고 없으면 저장소에 내려받는다.
+echo "[1.5/8] Verifying face-mask cascade..."
+CASCADE_FOUND=""
+for p in /usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml \
+         /usr/share/opencv/haarcascades/haarcascade_frontalface_default.xml \
+         /usr/local/share/opencv4/haarcascades/haarcascade_frontalface_default.xml; do
+    if [ -f "$p" ]; then CASCADE_FOUND="$p"; break; fi
+done
+if [ -n "$CASCADE_FOUND" ]; then
+    echo "   -> cascade OK: $CASCADE_FOUND"
+else
+    echo "   -> cascade not found in system paths, downloading to models/ ..."
+    mkdir -p models
+    if curl -fsSL -o models/haarcascade_frontalface_default.xml \
+        https://raw.githubusercontent.com/opencv/opencv/4.x/data/haarcascades/haarcascade_frontalface_default.xml
+    then
+        echo "   -> saved models/haarcascade_frontalface_default.xml"
+    else
+        echo "   -> WARNING: 다운로드 실패. 얼굴 마스킹이 fail-closed 폴백(상단 영역"
+        echo "      통째 마스킹)으로 동작합니다. ECOWARDEN_FACE_MASK_CASCADE 로"
+        echo "      경로를 직접 지정할 수 있습니다."
+    fi
+fi
 
 echo "[2/8] Verifying Python visualizer dependency..."
 python3 -c "import pygame; print('   -> Pygame', pygame.ver, 'OK')" 2>/dev/null \

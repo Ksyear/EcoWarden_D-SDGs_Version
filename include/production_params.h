@@ -4,7 +4,7 @@
  * This software is released under the MIT License.
  * See LICENSE file in the project root for details.
  *
- * Project: 데이터 무결성 보증형 디지털 트윈 관제 플랫폼
+ * Project: EcoWarden — LiDAR 기반 사생활 보호형 불법 투기 감지 시스템
  * Module : EMBEDDED - RplidarS2 LiDAR 센서 인터페이스 및 객체 탐지
  */
 
@@ -20,6 +20,9 @@
 #include "camera_module.h"
 #include "cluster_tracker.h"
 #include "dump_validation.h"
+#include "evidence_vault.h"
+#include "face_masking.h"
+#include "object_classifier.h"
 #include "servo_controller.h"
 #include "zone_policy.h"
 
@@ -269,6 +272,106 @@ inline DumpValidationParams DefaultDumpValidationParams() {
     dv.source_departed_mm = EnvDouble("ECOWARDEN_DUMP_VALIDATE_DEPART_MM",
                                       dv.source_departed_mm);
     return dv;
+}
+
+// ── FaceMasker: 증거 사진 얼굴 마스킹 (프라이버시 2계층) ────────────
+//
+//   기본값이 "켜짐 + fail-closed" 인 것은 의도적이다. 마스킹을 켜 놓고
+//   검출기가 없어서 원본이 그대로 나가는 상황이 가장 나쁘기 때문에,
+//   그 경우 상단 영역을 통째로 가린다(ECOWARDEN_FACE_MASK_FALLBACK=0
+//   으로 끄면 아예 저장하지 않는다).
+//
+inline FaceMaskParams DefaultFaceMaskParams() {
+    FaceMaskParams fm;
+    fm.enable = EnvBool("ECOWARDEN_FACE_MASK", fm.enable);
+    fm.mode = ParseFaceMaskMode(
+        EnvString("ECOWARDEN_FACE_MASK_MODE",
+                  FaceMaskModeToString(fm.mode)));
+    fm.cascade_path = EnvString("ECOWARDEN_FACE_MASK_CASCADE",
+                                fm.cascade_path);
+    fm.dnn_config  = EnvString("ECOWARDEN_FACE_MASK_DNN_CONFIG",
+                               fm.dnn_config);
+    fm.dnn_weights = EnvString("ECOWARDEN_FACE_MASK_DNN_WEIGHTS",
+                               fm.dnn_weights);
+    fm.dnn_confidence = EnvDouble("ECOWARDEN_FACE_MASK_DNN_CONF",
+                                  fm.dnn_confidence);
+    fm.scale_factor  = EnvDouble("ECOWARDEN_FACE_MASK_SCALE",
+                                 fm.scale_factor);
+    fm.min_neighbors = static_cast<int>(
+        EnvU32("ECOWARDEN_FACE_MASK_NEIGHBORS",
+               static_cast<uint32_t>(fm.min_neighbors)));
+    fm.min_face_px = static_cast<int>(
+        EnvU32("ECOWARDEN_FACE_MASK_MIN_PX",
+               static_cast<uint32_t>(fm.min_face_px)));
+    fm.expand_ratio  = EnvDouble("ECOWARDEN_FACE_MASK_EXPAND",
+                                 fm.expand_ratio);
+    fm.blur_strength = EnvDouble("ECOWARDEN_FACE_MASK_STRENGTH",
+                                 fm.blur_strength);
+    fm.pixelate_blocks = static_cast<int>(
+        EnvU32("ECOWARDEN_FACE_MASK_BLOCKS",
+               static_cast<uint32_t>(fm.pixelate_blocks)));
+    fm.require_detector = EnvBool("ECOWARDEN_FACE_MASK_REQUIRE",
+                                  fm.require_detector);
+    fm.fallback_mask_upper = EnvBool("ECOWARDEN_FACE_MASK_FALLBACK",
+                                     fm.fallback_mask_upper);
+    fm.fallback_upper_ratio = EnvDouble("ECOWARDEN_FACE_MASK_FALLBACK_RATIO",
+                                        fm.fallback_upper_ratio);
+    return fm;
+}
+
+// ── ObjectClassifier: 사람/동물/불명 분류 ───────────────────────────
+inline ClassifierParams DefaultClassifierParams() {
+    ClassifierParams cp;
+    cp.enable = EnvBool("ECOWARDEN_CLASSIFY", cp.enable);
+    cp.dnn_model  = EnvString("ECOWARDEN_CLASSIFY_MODEL",  cp.dnn_model);
+    cp.dnn_config = EnvString("ECOWARDEN_CLASSIFY_CONFIG", cp.dnn_config);
+    cp.dnn_labels = EnvString("ECOWARDEN_CLASSIFY_LABELS", cp.dnn_labels);
+    cp.dnn_confidence = EnvDouble("ECOWARDEN_CLASSIFY_CONF",
+                                  cp.dnn_confidence);
+    cp.dnn_input_size = static_cast<int>(
+        EnvU32("ECOWARDEN_CLASSIFY_INPUT",
+               static_cast<uint32_t>(cp.dnn_input_size)));
+
+    cp.person_min_width_mm = EnvDouble("ECOWARDEN_CLASSIFY_PERSON_MIN_W",
+                                       cp.person_min_width_mm);
+    cp.person_max_width_mm = EnvDouble("ECOWARDEN_CLASSIFY_PERSON_MAX_W",
+                                       cp.person_max_width_mm);
+    cp.person_min_speed_mm_s = EnvDouble("ECOWARDEN_CLASSIFY_PERSON_MIN_V",
+                                         cp.person_min_speed_mm_s);
+    cp.person_max_speed_mm_s = EnvDouble("ECOWARDEN_CLASSIFY_PERSON_MAX_V",
+                                         cp.person_max_speed_mm_s);
+    cp.animal_max_width_mm = EnvDouble("ECOWARDEN_CLASSIFY_ANIMAL_MAX_W",
+                                       cp.animal_max_width_mm);
+    cp.animal_min_speed_mm_s = EnvDouble("ECOWARDEN_CLASSIFY_ANIMAL_MIN_V",
+                                         cp.animal_min_speed_mm_s);
+    cp.noise_max_age_frames = EnvU32("ECOWARDEN_CLASSIFY_NOISE_AGE",
+                                     cp.noise_max_age_frames);
+    cp.person_min_match_frames = EnvU32("ECOWARDEN_CLASSIFY_PERSON_FRAMES",
+                                        cp.person_min_match_frames);
+    cp.static_min_stationary_frames =
+        EnvU32("ECOWARDEN_CLASSIFY_STATIC_FRAMES",
+               cp.static_min_stationary_frames);
+    cp.lidar_confidence_cap = EnvDouble("ECOWARDEN_CLASSIFY_LIDAR_CAP",
+                                        cp.lidar_confidence_cap);
+    return cp;
+}
+
+// ── EvidenceVault: 원본 암호화 보관 (프라이버시 3계층) ──────────────
+//
+//   기본값이 꺼짐인 것은 의도적이다. 키 설정 없이 켜 두면 fail-closed 로
+//   어차피 저장이 안 되고, "원본을 아예 안 남긴다"가 가장 보수적인
+//   기본 동작이기 때문이다. 운영자가 명시적으로 켜고 키를 넣어야 한다.
+//
+inline EvidenceVaultParams DefaultEvidenceVaultParams() {
+    EvidenceVaultParams vp;
+    vp.enable      = EnvBool("ECOWARDEN_EVIDENCE_VAULT", vp.enable);
+    vp.vault_dir   = EnvString("ECOWARDEN_EVIDENCE_DIR", vp.vault_dir);
+    vp.access_log  = EnvString("ECOWARDEN_EVIDENCE_LOG", vp.access_log);
+    vp.retain_days = EnvU32("ECOWARDEN_EVIDENCE_RETAIN_DAYS",
+                            vp.retain_days);
+    vp.key_hex     = EnvString("ECOWARDEN_EVIDENCE_KEY", vp.key_hex);
+    vp.key_file    = EnvString("ECOWARDEN_EVIDENCE_KEY_FILE", vp.key_file);
+    return vp;
 }
 
 } // namespace ecowarden

@@ -4,7 +4,7 @@
  * This software is released under the MIT License.
  * See LICENSE file in the project root for details.
  *
- * Project: 데이터 무결성 보증형 디지털 트윈 관제 플랫폼
+ * Project: EcoWarden — LiDAR 기반 사생활 보호형 불법 투기 감지 시스템
  * Module : EMBEDDED - RplidarS2 LiDAR 센서 인터페이스 및 객체 탐지
  */
 
@@ -44,19 +44,25 @@ EventNotifier::EventNotifier(const NotifierConfig& cfg) : cfg_(cfg) {
         curl_global_init(CURL_GLOBAL_DEFAULT);
     });
 
-    // API 키 주입: config → 환경변수 → (경고 후) 레거시 키 순.
-    // 레거시 키는 이미 git 이력에 노출되어 있으므로 서버에서 회전하고
-    // ECOWARDEN_API_KEY 로 새 키를 주입해야 한다.
+    // API 키 주입: config → 환경변수. 레거시 하드코딩 키는 v56 에서 제거했다.
+    //
+    //   이전 버전은 키가 없으면 저장소 이력에 노출된 키로 조용히 폴백했다.
+    //   그 키는 공개 저장소에서 누구나 읽을 수 있으므로 "인증"이 아니었고,
+    //   경고 로그를 띄워도 운영 중엔 아무도 보지 않는다. 이제는 키가 없으면
+    //   **전송을 시도하지 않고 로컬 큐에만 쌓는다** — 사고가 조용히
+    //   지나가는 대신 눈에 띄게 만든다 (fail-closed).
     if (cfg_.api_key.empty()) {
         if (const char* env = std::getenv("ECOWARDEN_API_KEY")) {
             if (env[0] != '\0') cfg_.api_key = env;
         }
     }
     if (cfg_.api_key.empty()) {
-        cfg_.api_key = "embedded-password-1004"; // legacy fallback
         std::fprintf(stderr,
-            "[NOTIFIER] ⚠ ECOWARDEN_API_KEY 미설정 — 노출된 레거시 키로 동작 중.\n"
-            "[NOTIFIER]   서버에서 키를 회전한 뒤 환경변수로 주입하세요.\n");
+            "[NOTIFIER] ⚠ ECOWARDEN_API_KEY 미설정 — 서버 전송을 비활성화합니다.\n"
+            "[NOTIFIER]   이벤트는 로컬 큐(%s)에만 쌓입니다.\n"
+            "[NOTIFIER]   설정: /etc/ecowarden/secrets.conf 에\n"
+            "[NOTIFIER]         ECOWARDEN_API_KEY=<서버에서 발급한 키>\n",
+            cfg_.queue_file_path.c_str());
     }
 
     // 큐 파일 경로 환경변수 오버라이드 (/tmp 는 모든 사용자가 읽을 수 있음 —
@@ -209,8 +215,11 @@ std::string EventNotifier::DumpingToJson(const DumpingEvent& evt, const std::str
         }
     }
 
+    // dumping 과 동일하게, 이미지가 없으면 null 을 명시한다.
     if (!image_base64.empty()) {
         j["image_base64"] = image_base64;
+    } else {
+        j["image_base64"] = nullptr;
     }
 
     return j.dump();
@@ -221,15 +230,35 @@ std::string EventNotifier::IntrusionToJson(const IntrusionEvent& evt,
                                            const std::string& image_base64) {
     nlohmann::json j;
 
-    j["type"]       = "intrusion";
+    // v56: 분류기가 붙으면 event_type 이 unknown_object /
+    //      animal_or_small_object 로 갈릴 수 있다. 레거시 서버가 "type"
+    //      만 보고 분기하던 동작을 깨지 않도록 기본값은 "intrusion".
+    j["type"]       = (evt.event_type && evt.event_type[0]) ? evt.event_type
+                                                            : "intrusion";
     j["person_id"]  = static_cast<int>(evt.person_track_id);
     j["person_x"]   = static_cast<float>(evt.person_x_mm / 1000.0);
     j["person_y"]   = static_cast<float>(evt.person_y_mm / 1000.0);
     j["zone"]       = evt.zone;
     j["event_time"] = static_cast<int64_t>(evt.timestamp_ms) * 1000000LL;
 
+    // 분류 결과 — 서버가 무시해도 무방한 추가 필드 (v56)
+    if (evt.severity && evt.severity[0]) {
+        j["severity"] = evt.severity;
+    }
+    if (evt.object_class && evt.object_class[0]) {
+        j["object_class"] = evt.object_class;
+    }
+    if (evt.classify_confidence > 0.0) {
+        j["classify_confidence"] =
+            static_cast<float>(evt.classify_confidence);
+    }
+
+    // 백엔드 합의 스키마: 이미지가 없으면 **필드를 생략하지 않고 null** 을 보낸다.
+    // (필드 자체가 없으면 스키마 검증을 엄격하게 하는 서버에서 걸린다)
     if (!image_base64.empty()) {
         j["image_base64"] = image_base64;
+    } else {
+        j["image_base64"] = nullptr;
     }
 
     return j.dump();
@@ -244,6 +273,10 @@ std::string EventNotifier::IntrusionToJson(const IntrusionEvent& evt,
 //       에 쌓이지 않고 dropped_count_ 증가 후 폐기되도록 한다 (SendLoop 패치 참조).
 //
 bool EventNotifier::HttpPost(const std::string& url, const std::string& json_body) {
+    // v56 fail-closed: 키가 없으면 아예 보내지 않는다. false 를 돌려주면
+    // SendLoop 가 로컬 큐에 보존하므로 이벤트가 유실되지는 않는다.
+    if (cfg_.api_key.empty()) return false;
+
     if (cfg_.dry_run) {
         // dry_run 모드: 네트워크 호출하지 않고 명시적 false. SendLoop 가
         // dropped_count_ 를 증가시키고 파일/큐에 쌓지 않도록 처리한다.
@@ -413,6 +446,7 @@ void EventNotifier::ClipLoop() {
 }
 
 bool EventNotifier::HttpPostClip(const ClipJob& job) {
+    if (cfg_.api_key.empty()) return false;   // v56 fail-closed (HttpPost 와 동일)
     if (cfg_.dry_run) return false;
 
     CURL* curl = curl_easy_init();

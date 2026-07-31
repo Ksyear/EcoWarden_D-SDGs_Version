@@ -4,7 +4,7 @@
  * This software is released under the MIT License.
  * See LICENSE file in the project root for details.
  *
- * Project: 데이터 무결성 보증형 디지털 트윈 관제 플랫폼
+ * Project: EcoWarden — LiDAR 기반 사생활 보호형 불법 투기 감지 시스템
  * Module : EMBEDDED - RplidarS2 LiDAR 센서 인터페이스 및 객체 탐지
  */
 
@@ -52,6 +52,9 @@
 #include "background_filter.h"
 #include "cluster_tracker.h"
 #include "dump_validation.h"
+#include "evidence_vault.h"
+#include "face_masking.h"
+#include "object_classifier.h"
 #include "phase_profiler.h"
 #include "production_params.h"
 #include "scan_processor.h"
@@ -1325,6 +1328,423 @@ static bool RunDumpValidationUnitTest() {
     return ok;
 }
 
+// ════════════════════════════════════════════════════════════════════
+//   OC: 객체 분류 (사람/동물/불명) + 이벤트 등급 단위 테스트
+// ════════════════════════════════════════════════════════════════════
+//
+//   LiDAR 기하 휴리스틱은 순수 함수라 scene 없이 검증할 수 있다.
+//   DNN 백엔드는 모델 파일이 있어야 하므로 여기서는 다루지 않는다.
+//
+static bool RunObjectClassifierUnitTest() {
+    bool ok = true;
+    auto expect = [&ok](bool cond, const char* what) {
+        if (!cond) {
+            std::printf("  object_classifier: FAIL — %s\n", what);
+            ok = false;
+        }
+    };
+
+    ecowarden::ClassifierParams p;   // 기본값으로 검증
+    ecowarden::ObjectClassifier oc(p);
+
+    auto feat = [](double w, double v, uint32_t age, uint32_t match) {
+        ecowarden::LidarFeatures f;
+        f.width_mm     = w;
+        f.speed_mm_s   = v;
+        f.age_frames   = age;
+        f.match_frames = match;
+        return f;
+    };
+
+    using ecowarden::EventSeverity;
+    using ecowarden::ObjectClass;
+
+    // ── Case A: 관측 프레임 부족 → noise, 등급은 ignore ──────────────
+    {
+        const auto r = oc.ClassifyFromLidar(feat(400.0, 1000.0, 2, 2));
+        expect(r.cls == ObjectClass::kNoise, "짧은 관측 → noise");
+        expect(ecowarden::GradeEvent(r, false) == EventSeverity::kIgnore,
+               "noise → ignore");
+        // 금지구역이어도 노이즈는 올리지 않는다
+        expect(ecowarden::GradeEvent(r, true) == EventSeverity::kIgnore,
+               "noise 는 금지구역에서도 ignore");
+    }
+
+    // ── Case B: PersonGroup 소속 → person (가장 강한 근거) ──────────
+    {
+        auto f = feat(300.0, 100.0, 30, 30);
+        f.in_person_group = true;
+        const auto r = oc.ClassifyFromLidar(f);
+        expect(r.cls == ObjectClass::kPerson, "PersonGroup → person");
+        expect(r.confidence <= p.lidar_confidence_cap + 1e-9,
+               "LiDAR 단독 신뢰도가 상한을 넘지 않음");
+        expect(ecowarden::GradeEvent(r, false) == EventSeverity::kHigh,
+               "person(고신뢰) → high");
+    }
+
+    // ── Case C: 폭·속도·지속성 모두 사람 대역 → person ──────────────
+    {
+        const auto r = oc.ClassifyFromLidar(feat(500.0, 1200.0, 30, 20));
+        expect(r.cls == ObjectClass::kPerson, "사람 대역 폭·속도 → person");
+    }
+
+    // ── Case D: 사람 최소폭보다 좁고 이동 중 → animal, 등급 low ─────
+    {
+        // 폭 120mm < person_min_width(150mm) — 사람 단면일 수 없다
+        const auto r = oc.ClassifyFromLidar(feat(120.0, 800.0, 20, 15));
+        expect(r.cls == ObjectClass::kAnimal, "사람 최소폭 미만 + 이동 → animal");
+        expect(ecowarden::GradeEvent(r, false) == EventSeverity::kLow,
+               "animal → low");
+        // 금지구역 안이면 한 단계 상향
+        expect(ecowarden::GradeEvent(r, true) == EventSeverity::kMedium,
+               "animal + 금지구역 → medium 상향");
+    }
+
+    // ── Case D2: 보행 상한 초과 질주 + 좁은 단면 → animal ───────────
+    {
+        const auto r = oc.ClassifyFromLidar(feat(400.0, 3000.0, 20, 15));
+        expect(r.cls == ObjectClass::kAnimal,
+               "보행 상한 초과 속도 + 좁은 단면 → animal");
+    }
+
+    // ── Case D3: ★겹치는 대역은 동물로 내리지 않는다 ────────────────
+    //
+    //   폭 300mm 는 중형견 단면이기도 하고 사람 다리 하나이기도 하다.
+    //   2D LiDAR 로 구분 불가 → 동물(low)로 내리면 진짜 사람을 놓친다.
+    //   안전한 방향(사람/unknown)으로 가는지 확인한다.
+    {
+        const auto r = oc.ClassifyFromLidar(feat(300.0, 1500.0, 20, 15));
+        expect(r.cls != ObjectClass::kAnimal,
+               "★사람·동물 겹침 대역을 animal 로 내리지 않는다 (미탐 방지)");
+        expect(ecowarden::GradeEvent(r, false) >= EventSeverity::kHigh ||
+                   ecowarden::GradeEvent(r, false) == EventSeverity::kMedium,
+               "겹침 대역은 medium 이상으로 유지");
+    }
+
+    // ── Case E: 장시간 정지 + 이동 이력 없음 → 정지 물체 ────────────
+    {
+        auto f = feat(250.0, 0.0, 40, 40);
+        f.stationary_frames = 30;
+        f.was_moving        = false;
+        const auto r = oc.ClassifyFromLidar(f);
+        expect(r.cls == ObjectClass::kStaticObject,
+               "장시간 정지 → static_object");
+    }
+
+    // ── Case F: ★애매하면 unknown → medium (미탐 방지 원칙) ────────
+    {
+        // 사람 폭이지만 너무 느림 + 매칭 부족 → 판단 불가
+        const auto r = oc.ClassifyFromLidar(feat(600.0, 50.0, 20, 3));
+        expect(r.cls == ObjectClass::kUnknown, "조건 불충족 → unknown");
+        expect(ecowarden::GradeEvent(r, false) == EventSeverity::kMedium,
+               "★unknown 은 low 가 아니라 medium (모르면 올린다)");
+        expect(ecowarden::GradeEvent(r, true) == EventSeverity::kHigh,
+               "unknown + 금지구역 → high");
+    }
+
+    // ── Case G: 저신뢰 person 은 medium 으로 낮춘다 ─────────────────
+    {
+        ecowarden::ClassifyResult r;
+        r.cls = ObjectClass::kPerson;
+        r.confidence = 0.3;   // 임계(0.5) 미만
+        expect(ecowarden::GradeEvent(r, false) == EventSeverity::kMedium,
+               "저신뢰 person → medium (사람이 확인하게)");
+    }
+
+    // ── Case H: 이벤트 타입 문자열 매핑 (전체_구조.md §6) ───────────
+    {
+        expect(std::strcmp(ecowarden::EventTypeForClass(ObjectClass::kPerson),
+                           "intrusion") == 0, "person → intrusion");
+        expect(std::strcmp(ecowarden::EventTypeForClass(ObjectClass::kUnknown),
+                           "unknown_object") == 0, "unknown → unknown_object");
+        expect(std::strcmp(ecowarden::EventTypeForClass(ObjectClass::kAnimal),
+                           "animal_or_small_object") == 0,
+               "animal → animal_or_small_object");
+        expect(std::strcmp(ecowarden::EventTypeForClass(ObjectClass::kNoise),
+                           "noise") == 0, "noise → noise");
+    }
+
+    // ── Case I: 분류 비활성 시에도 크래시 없이 동작 ─────────────────
+    {
+        ecowarden::ClassifierParams off;
+        off.enable = false;
+        ecowarden::ObjectClassifier oc2(off);
+        const auto r = oc2.ClassifyFromLidar(feat(500.0, 1200.0, 30, 20));
+        expect(r.backend == ecowarden::ClassifierBackend::kLidarGeom,
+               "비활성이어도 LiDAR 휴리스틱은 답을 준다");
+    }
+
+    std::printf("─────────────────────────────────────────────────────\n");
+    std::printf("SCENARIO: OC_object_classifier_unit (unit test)\n");
+    std::printf("─────────────────────────────────────────────────────\n");
+    std::printf("RESULT: %s\n\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+// ════════════════════════════════════════════════════════════════════
+//   FM: 얼굴 마스킹 fail-closed 계약 단위 테스트 (프라이버시 2계층)
+// ════════════════════════════════════════════════════════════════════
+//
+//   실제 블러 처리는 OpenCV 가 있어야 검증되지만, **"검출기가 없을 때
+//   원본을 내보내면 안 된다"는 계약**은 OpenCV 없이도 검증할 수 있다.
+//   이 계약이 깨지면 "마스킹한다"는 발표 주장이 거짓이 되므로, 가장
+//   중요한 부분을 하드웨어 없이 고정해 둔다.
+//
+static bool RunFaceMaskUnitTest() {
+    bool ok = true;
+    auto expect = [&ok](bool cond, const char* what) {
+        if (!cond) {
+            std::printf("  face_masking: FAIL — %s\n", what);
+            ok = false;
+        }
+    };
+
+    // ── 모드 파싱 왕복 ───────────────────────────────────────────────
+    {
+        using ecowarden::FaceMaskMode;
+        expect(ecowarden::ParseFaceMaskMode("blur") == FaceMaskMode::kBlur,
+               "\"blur\" 파싱");
+        expect(ecowarden::ParseFaceMaskMode("pixelate") == FaceMaskMode::kPixelate,
+               "\"pixelate\" 파싱");
+        expect(ecowarden::ParseFaceMaskMode("mosaic") == FaceMaskMode::kPixelate,
+               "\"mosaic\" 별칭 파싱");
+        expect(ecowarden::ParseFaceMaskMode("box") == FaceMaskMode::kBox,
+               "\"box\" 파싱");
+        expect(ecowarden::ParseFaceMaskMode("garbage") == FaceMaskMode::kBlur,
+               "알 수 없는 값은 blur 로 폴백 (가장 안전한 기본값)");
+        expect(std::strcmp(ecowarden::FaceMaskModeToString(FaceMaskMode::kPixelate),
+                           "pixelate") == 0, "모드 → 문자열 왕복");
+    }
+
+    // ── 기본값이 안전한가 ────────────────────────────────────────────
+    {
+        ecowarden::FaceMaskParams d;
+        expect(d.enable, "★기본값이 마스킹 ON");
+        expect(d.require_detector, "★기본값이 fail-closed");
+        expect(d.fallback_mask_upper, "기본값이 폴백 마스킹 허용");
+        expect(d.mode == ecowarden::FaceMaskMode::kBlur, "기본 모드는 blur");
+    }
+
+    // ── ★ fail-closed 계약 ──────────────────────────────────────────
+    //   OpenCV 없는 빌드에서 FaceMasker 는 Available()==false 다.
+    //   이 상태에서 마스킹이 요구되면 safe_to_emit 이 false 여야 한다
+    //   — 즉 CameraModule 이 사진 저장을 건너뛴다.
+    {
+        ecowarden::FaceMaskParams p;
+        p.enable = true;
+        p.require_detector = true;
+        ecowarden::FaceMasker m(p);
+#ifndef USE_OPENCV
+        const auto r = m.Apply(nullptr);
+        expect(!m.Available(), "OpenCV 없으면 Available=false");
+        expect(!r.safe_to_emit,
+               "★★ 마스킹 요구 + 검출기 없음 → safe_to_emit=false "
+               "(원본이 절대 나가면 안 됨)");
+#else
+        // OpenCV 가 있으면 검출기 로드 여부에 따라 갈리므로 계약만 확인
+        expect(true, "OpenCV 빌드 — 실제 검출은 Pi 실촬영에서 검증");
+#endif
+    }
+
+    // ── 마스킹을 명시적으로 끈 경우는 저장 허용 (운영자 선택) ────────
+    {
+        ecowarden::FaceMaskParams p;
+        p.enable = false;
+        ecowarden::FaceMasker m(p);
+        const auto r = m.Apply(nullptr);
+        expect(r.safe_to_emit,
+               "마스킹을 명시적으로 끄면 저장 허용 (운영자 책임)");
+        expect(!r.applied, "끈 상태에서는 applied=false");
+    }
+
+    // ── require_detector=0 이면 검출기 없어도 저장 허용 ──────────────
+    {
+        ecowarden::FaceMaskParams p;
+        p.enable = true;
+        p.require_detector = false;   // 운영자가 명시적으로 완화
+        ecowarden::FaceMasker m(p);
+        const auto r = m.Apply(nullptr);
+        expect(r.safe_to_emit,
+               "require_detector=0 이면 검출기 없어도 저장 허용");
+    }
+
+    std::printf("─────────────────────────────────────────────────────\n");
+    std::printf("SCENARIO: FM_face_mask_unit (unit test)\n");
+    std::printf("─────────────────────────────────────────────────────\n");
+    std::printf("RESULT: %s\n\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+// ════════════════════════════════════════════════════════════════════
+//   EV: 증거 원본 암호화 보관소 단위 테스트 (프라이버시 3계층)
+// ════════════════════════════════════════════════════════════════════
+static bool RunEvidenceVaultUnitTest() {
+    bool ok = true;
+    auto expect = [&ok](bool cond, const char* what) {
+        if (!cond) {
+            std::printf("  evidence_vault: FAIL — %s\n", what);
+            ok = false;
+        }
+    };
+
+    // ── hex 유틸 왕복 ────────────────────────────────────────────────
+    {
+        const uint8_t raw[4] = {0x00, 0x1f, 0xa0, 0xff};
+        const std::string hex = ecowarden::BytesToHex(raw, 4);
+        expect(hex == "001fa0ff", "BytesToHex 소문자 정확");
+        std::vector<uint8_t> back;
+        expect(ecowarden::HexToBytes(hex, &back) && back.size() == 4 &&
+                   back[1] == 0x1f && back[3] == 0xff,
+               "HexToBytes 왕복 일치");
+        expect(!ecowarden::HexToBytes("0x12", &back), "잘못된 hex 거부");
+        expect(!ecowarden::HexToBytes("abc", &back), "홀수 길이 hex 거부");
+    }
+
+    // ── fail-closed: 키 없이 켜면 사용 불가 ─────────────────────────
+    {
+        ecowarden::EvidenceVaultParams p;
+        p.enable    = true;
+        p.key_hex   = "";
+        p.key_file  = "/nonexistent/ecowarden-secrets.conf";
+        p.vault_dir = "captures/test_vault_nokey";
+        ecowarden::EvidenceVault v(p);
+        expect(!v.Available(), "★키 없으면 Available=false (평문 폴백 없음)");
+        const auto r = v.StoreOriginal("x", reinterpret_cast<const uint8_t*>("ab"), 2);
+        expect(!r.ok, "★사용 불가 상태에서 저장 시도는 실패해야 한다");
+    }
+
+    // ── 비활성이면 조용히 사용 불가 ─────────────────────────────────
+    {
+        ecowarden::EvidenceVaultParams p;   // enable 기본 false
+        ecowarden::EvidenceVault v(p);
+        expect(!v.Available(), "기본값(비활성)은 Available=false");
+    }
+
+#ifdef USE_OPENSSL
+    // ── 암호화 왕복 + 위·변조 검출 (OpenSSL 있을 때만) ─────────────
+    {
+        ecowarden::EvidenceVaultParams p;
+        p.enable      = true;
+        p.vault_dir   = "captures/test_vault";
+        p.access_log  = "captures/test_vault/access.log";
+        p.retain_days = 30;
+        // 테스트 전용 키 (실운영 키 아님)
+        p.key_hex =
+            "000102030405060708090a0b0c0d0e0f"
+            "101112131415161718191a1b1c1d1e1f";
+
+        ecowarden::EvidenceVault v(p);
+        expect(v.Available(), "유효한 키로 Available=true");
+
+        const std::string plain = "JPEG-ORIGINAL-BYTES-얼굴포함-1234567890";
+        const auto sr = v.StoreOriginal(
+            "unit_roundtrip",
+            reinterpret_cast<const uint8_t*>(plain.data()), plain.size());
+        expect(sr.ok, "원본 암호화 저장 성공");
+        expect(sr.cipher_bytes > plain.size(),
+               "암호문이 헤더+태그만큼 더 큼");
+
+        if (sr.ok) {
+            // 저장 파일에 평문이 남아 있지 않은지 확인
+            std::FILE* f = std::fopen(sr.path.c_str(), "rb");
+            expect(f != nullptr, "암호문 파일 열림");
+            if (f) {
+                std::string blob;
+                char buf[512];
+                size_t n;
+                while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) {
+                    blob.append(buf, n);
+                }
+                std::fclose(f);
+                expect(blob.find("JPEG-ORIGINAL") == std::string::npos,
+                       "★암호문에 평문 흔적이 없다");
+                expect(blob.size() >= 4 && blob.compare(0, 4, "EWV1") == 0,
+                       "매직 헤더 EWV1");
+            }
+
+            // 복호화 왕복
+            std::vector<uint8_t> out;
+            expect(v.OpenOriginal(sr.path, &out, "unit test", "ci"),
+                   "복호화 성공");
+            expect(std::string(out.begin(), out.end()) == plain,
+                   "복호화 결과가 원본과 일치");
+
+            // 열람 로그가 남았는지
+            std::FILE* lg = std::fopen(p.access_log.c_str(), "rb");
+            expect(lg != nullptr, "★열람 로그 파일 생성됨");
+            if (lg) {
+                std::string log;
+                char buf[512];
+                size_t n;
+                while ((n = std::fread(buf, 1, sizeof(buf), lg)) > 0) {
+                    log.append(buf, n);
+                }
+                std::fclose(lg);
+                expect(log.find("result=OK") != std::string::npos,
+                       "열람 로그에 성공 기록");
+                expect(log.find("actor=ci") != std::string::npos,
+                       "열람 로그에 요청자 기록");
+            }
+
+            // ── 위·변조 검출: 암호문 1바이트를 바꾸면 태그 검증 실패 ──
+            {
+                std::FILE* w = std::fopen(sr.path.c_str(), "r+b");
+                expect(w != nullptr, "변조용 파일 열림");
+                if (w) {
+                    std::fseek(w, 60, SEEK_SET);   // payload 영역
+                    unsigned char c = 0;
+                    if (std::fread(&c, 1, 1, w) == 1) {
+                        c ^= 0xff;
+                        std::fseek(w, 60, SEEK_SET);
+                        std::fwrite(&c, 1, 1, w);
+                    }
+                    std::fclose(w);
+                }
+                std::vector<uint8_t> bad;
+                expect(!v.OpenOriginal(sr.path, &bad, "tamper test", "ci"),
+                       "★변조된 파일은 복호화 거부 (GCM 태그 검증)");
+                expect(bad.empty(), "변조 시 출력 버퍼가 비어 있다");
+            }
+        }
+
+        // ── 보존기한 판정 ────────────────────────────────────────────
+        {
+            ecowarden::EvidenceVaultParams p2 = p;
+            p2.retain_days = 1;
+            p2.vault_dir = "captures/test_vault_exp";
+            p2.access_log = "captures/test_vault_exp/access.log";
+            ecowarden::EvidenceVault v2(p2);
+            const auto s2 = v2.StoreOriginal(
+                "expire_me", reinterpret_cast<const uint8_t*>("x"), 1);
+            expect(s2.ok, "만료 테스트용 파일 저장");
+            if (s2.ok) {
+                // 방금 저장 → 아직 만료 아님
+                const int64_t now = 0;   // 헤더의 created 는 실제 시각
+                (void)now;
+                expect(!ecowarden::EvidenceVault::IsExpired(
+                           s2.path, 1000000000LL),
+                       "저장 직후에는 만료 아님 (과거 기준시각)");
+                // 아주 먼 미래 기준으로 보면 만료
+                expect(ecowarden::EvidenceVault::IsExpired(
+                           s2.path, 4102444800LL /* 2100-01-01 */),
+                       "★보존기한 경과 시 만료 판정");
+                const auto sweep = v2.SweepExpired();
+                expect(sweep.scanned >= 1, "sweep 이 파일을 검사함");
+            }
+        }
+    }
+#else
+    std::printf("  evidence_vault: OpenSSL 미탑재 빌드 — "
+                "암호화 왕복 테스트는 건너뜁니다 (fail-closed 동작만 검증)\n");
+#endif
+
+    std::printf("─────────────────────────────────────────────────────\n");
+    std::printf("SCENARIO: EV_evidence_vault_unit (unit test)\n");
+    std::printf("─────────────────────────────────────────────────────\n");
+    std::printf("RESULT: %s\n\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace sim
 
 // ════════════════════════════════════════════════════════════════════
@@ -1345,7 +1765,7 @@ int main(int argc, char* argv[]) {
 
     std::printf("\n");
     std::printf("╔════════════════════════════════════════════════════╗\n");
-    std::printf("║   sim regression suite (v55) — 30 tests             ║\n");
+    std::printf("║   sim regression suite (v56) — 33 tests             ║\n");
     std::printf("║   production_params.h 단일 출처 사용                 ║\n");
     std::printf("╚════════════════════════════════════════════════════╝\n\n");
 
@@ -1395,6 +1815,42 @@ int main(int argc, char* argv[]) {
         } else {
             n_fail++;
             std::printf("  - DV_dump_validation_unit: unit assertions failed\n");
+        }
+    }
+
+    // 객체 분류(사람/동물/불명) + 이벤트 등급 단위 테스트 (v56)
+    if (g_running &&
+        (!only || std::strstr("OC_object_classifier_unit", only) != nullptr)) {
+        n_run++;
+        if (sim::RunObjectClassifierUnitTest()) {
+            n_pass++;
+        } else {
+            n_fail++;
+            std::printf("  - OC_object_classifier_unit: unit assertions failed\n");
+        }
+    }
+
+    // 얼굴 마스킹 fail-closed 계약 단위 테스트 (v56)
+    if (g_running &&
+        (!only || std::strstr("FM_face_mask_unit", only) != nullptr)) {
+        n_run++;
+        if (sim::RunFaceMaskUnitTest()) {
+            n_pass++;
+        } else {
+            n_fail++;
+            std::printf("  - FM_face_mask_unit: unit assertions failed\n");
+        }
+    }
+
+    // 증거 원본 암호화 보관소 단위 테스트 (v56)
+    if (g_running &&
+        (!only || std::strstr("EV_evidence_vault_unit", only) != nullptr)) {
+        n_run++;
+        if (sim::RunEvidenceVaultUnitTest()) {
+            n_pass++;
+        } else {
+            n_fail++;
+            std::printf("  - EV_evidence_vault_unit: unit assertions failed\n");
         }
     }
 

@@ -4,7 +4,7 @@
  * This software is released under the MIT License.
  * See LICENSE file in the project root for details.
  *
- * Project: 데이터 무결성 보증형 디지털 트윈 관제 플랫폼
+ * Project: EcoWarden — LiDAR 기반 사생활 보호형 불법 투기 감지 시스템
  * Module : EMBEDDED - 금지구역(Zone) 정책 / 침입 탐지
  */
 
@@ -51,6 +51,14 @@ struct IntrusionEvent {
     double   person_x_mm     = 0.0;
     double   person_y_mm     = 0.0;
     uint64_t timestamp_ms    = 0;
+
+    // ── 객체 분류 결과 (v56, object_classifier.h) ────────────────────
+    //   기본값은 분류기를 붙이기 전 동작과 동일하다 — 금지구역 진입은
+    //   사람으로 보고 severity=high. 분류기가 켜지면 main 이 덮어쓴다.
+    const char* event_type = "intrusion";        // 전체_구조.md §6 이벤트 유형
+    const char* object_class = "person";         // person|animal|unknown|...
+    const char* severity = "high";               // high|medium|low
+    double      classify_confidence = 0.0;       // 0.0 = 분류기 미적용
 };
 
 class ZonePolicy {

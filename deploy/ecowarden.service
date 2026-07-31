@@ -1,5 +1,5 @@
 [Unit]
-Description=Ecowarden LiDAR Dumping Detection (v5)
+Description=EcoWarden LiDAR Illegal Dumping Detection (v56)
 After=network-online.target
 Wants=network-online.target
 
@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=ecowarden
 WorkingDirectory=/opt/ecowarden
-ExecStart=/opt/ecowarden/rplidar_app /dev/ttyUSB0 https://api.ecowarden.systems/api/dumping-event 192.168.20.173:5005
+ExecStart=/opt/ecowarden/rplidar_app /dev/ttyUSB0 https://api.ecowarden.systems/api/dumping-event 192.168.20.102:5005
 
 # ── 환경 변수 ──────────────────────────────────────────────────────
 #
@@ -25,7 +25,9 @@ Environment=ECOWARDEN_DRY_RUN=0
 #   API 키는 유닛 파일이나 소스에 직접 쓰지 않는다. 아래 파일에 보관:
 #     sudo install -m 0600 -o root -g root /dev/null /etc/ecowarden/secrets.conf
 #     echo 'ECOWARDEN_API_KEY=<새 키>' | sudo tee /etc/ecowarden/secrets.conf
-#   '-' 접두사: 파일이 없어도 서비스는 기동된다 (레거시 키 fallback + 경고 로그).
+#   '-' 접두사: 파일이 없어도 서비스는 기동된다.
+#   ⚠ v56부터 레거시 키 fallback 이 제거됐다 — 키가 없으면 서버 전송이
+#     비활성되고 이벤트는 로컬 큐에만 쌓인다 (유실은 없지만 서버엔 안 감).
 EnvironmentFile=-/etc/ecowarden/secrets.conf
 
 # ECOWARDEN_PROFILE_CSV (v5 [2 PROFILE]):
@@ -50,6 +52,31 @@ Environment=ECOWARDEN_SERVO_SERIAL_DEVICE=/dev/ttyACM0
 #   captures/ 아래에 저장되므로 ReadWritePaths 로 이미 허용됨.
 # Environment=ECOWARDEN_BLACKBOX_SEC=10
 # Environment=ECOWARDEN_BLACKBOX_FPS=10
+
+# ── 프라이버시 2계층: 얼굴 마스킹 (v56, README §3.9) ────────────────
+#   기본 ON + fail-closed. 검출기를 못 찾으면 원본을 내보내지 않고
+#   상단 영역을 통째로 마스킹한다. 끄면 원본이 그대로 전송되므로
+#   운영에서는 켠 상태를 유지할 것.
+Environment=ECOWARDEN_FACE_MASK=1
+Environment=ECOWARDEN_FACE_MASK_REQUIRE=1
+Environment=ECOWARDEN_FACE_MASK_MODE=blur
+# Environment=ECOWARDEN_FACE_MASK_CASCADE=/opt/ecowarden/models/haarcascade_frontalface_default.xml
+
+# ── 프라이버시 3계층: 원본 암호화 보관 (v56, README §3.9) ───────────
+#   기본 OFF. 켜려면 secrets.conf 에 키를 넣어야 한다:
+#     openssl rand -hex 32
+#     echo 'ECOWARDEN_EVIDENCE_KEY=<위 값>' | sudo tee -a /etc/ecowarden/secrets.conf
+#   키가 없으면 fail-closed 로 원본을 저장하지 않는다 (평문 폴백 없음).
+# Environment=ECOWARDEN_EVIDENCE_VAULT=1
+# Environment=ECOWARDEN_EVIDENCE_RETAIN_DAYS=30
+
+# ── 객체 분류 · 이벤트 등급 (v56, README §3.10) ─────────────────────
+#   기본 ON. 모델을 지정하지 않으면 LiDAR 기하 휴리스틱으로 동작하며
+#   신뢰도 상한 0.7 이 적용된다. 모델을 붙이면 카메라 AI 로 동작.
+Environment=ECOWARDEN_CLASSIFY=1
+# Environment=ECOWARDEN_CLASSIFY_MODEL=/opt/ecowarden/models/mobilenet_ssd.caffemodel
+# Environment=ECOWARDEN_CLASSIFY_CONFIG=/opt/ecowarden/models/mobilenet_ssd.prototxt
+# Environment=ECOWARDEN_CLASSIFY_LABELS=/opt/ecowarden/models/labels.txt
 
 Restart=on-failure
 RestartSec=5
