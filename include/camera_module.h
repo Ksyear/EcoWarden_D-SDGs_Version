@@ -27,6 +27,15 @@ struct BlackboxParams {
     uint32_t post_seconds = 10;
     double   fps          = 10.0;
     int      jpeg_quality = 75;
+
+    // 동시에 저장할 수 있는 클립 수.
+    //
+    //   한 번 저장하는 데 post_seconds(기본 10초) + 인코딩 + 얼굴 마스킹
+    //   시간이 걸린다. 동시 1개만 허용하면 그 사이에 확정된 투기의 영상이
+    //   통째로 버려진다 — 실제로 현장 로그에서 확정된 투기(object 49)의
+    //   블랙박스가 "already in progress" 로 skip 됐다.
+    //   메모리는 클립당 대략 40~60MB(1080p JPEG 200장) 이므로 2~3 이 상한.
+    uint32_t max_concurrent_saves = 2;
 };
 
 // ── 블랙박스 클립 메타 — 서버 업로드 시 이벤트 레코드와 연결하는 키 ──
@@ -172,8 +181,11 @@ private:
     std::mutex blackbox_mutex_;
     std::deque<BlackboxFrame> blackbox_buf_;
     int64_t next_blackbox_ms_ = 0;
-    std::thread blackbox_thread_;
-    std::atomic<bool> blackbox_saving_{false};
+    // 동시 저장 지원 (v56): 단일 스레드였을 때 확정된 투기의 영상이
+    // 다른 저장 때문에 버려지는 문제가 있었다.
+    std::mutex blackbox_thread_mutex_;
+    std::vector<std::thread> blackbox_threads_;
+    std::atomic<uint32_t> blackbox_active_{0};
 };
 
 } // namespace ecowarden
