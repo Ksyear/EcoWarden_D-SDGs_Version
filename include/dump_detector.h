@@ -918,14 +918,13 @@ private:
 
     uint32_t RequiredSuspectFrames(DumpSizeBand band) const {
         switch (band) {
-            case DumpSizeBand::Tiny:   return 6;
-            case DumpSizeBand::Small:  return 6;
-            case DumpSizeBand::Medium: return 5;
-            case DumpSizeBand::Large:  return 6;
-            case DumpSizeBand::XL:     return 6;
-            case DumpSizeBand::Reject: return 255;
+            case DumpSizeBand::Tiny:   return ctx_.params->dump_frames_tiny;
+            case DumpSizeBand::Small:  return ctx_.params->dump_frames_small;
+            case DumpSizeBand::Medium: return ctx_.params->dump_frames_medium;
+            case DumpSizeBand::Large:  return ctx_.params->dump_frames_large;
+            case DumpSizeBand::XL:     return ctx_.params->dump_frames_xl;
+            default:                   return ctx_.params->dump_frames_small;
         }
-        return 255;
     }
 
     bool IsObjectStable(const Track& tr, double max_avg_speed_mm) const {

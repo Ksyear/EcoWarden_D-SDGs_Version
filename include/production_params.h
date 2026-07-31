@@ -175,6 +175,72 @@ inline TrackerParams DefaultTrackerParams() {
     tp.tentative_confirm_frames = EnvU32(
         "ECOWARDEN_TENTATIVE_CONFIRM_FRAMES",
         tp.tentative_confirm_frames);
+
+    // ── 투기 감지 감도 프리셋 ────────────────────────────────────────
+    //
+    //   ECOWARDEN_DUMP_SENSITIVITY = high | normal | low   (기본 high)
+    //
+    //   여러 게이트를 따로 만지면 서로 상쇄되기 쉬워서, 함께 움직여야
+    //   하는 값들을 한 덩어리로 묶었다.
+    //
+    //   기본을 high 로 둔 것은 의도적이다. 이 시스템은 **1차 스크리너**이고
+    //   최종 판단은 관리자가 증거 사진으로 한다. 놓친 투기는 되돌릴 수
+    //   없지만, 오탐은 사람이 사진 한 번 보고 거르면 된다.
+    //   → 줄여야 할 것은 오탐이 아니라 미탐.
+    //
+    //   오탐이 감당 안 되면 normal, 시연에서 확실한 것만 잡으려면 low.
+    //   개별 값은 아래 env 로 프리셋을 덮어쓸 수 있다.
+    {
+        const std::string sens =
+            EnvString("ECOWARDEN_DUMP_SENSITIVITY", "high");
+        if (sens == "high") {
+            tp.dump_frames_tiny   = 3;
+            tp.dump_frames_small  = 3;
+            tp.dump_frames_medium = 3;
+            tp.dump_frames_large  = 2;
+            tp.dump_frames_xl     = 2;
+            // 2 로 내리면 반사 스파이크가 두 번만 찍혀도 확정된다
+            //   (회귀 K_reflective_spike_near_path 로 확인). 3 이 하한선.
+            tp.dump_confirm_min_total_matches = 3;
+            tp.fast_confirm_min_frames        = 2;
+            tp.source_lost_confirm_frames     = 4;
+            // trajectory_birth_suspect_min_stationary_frames 는 낮추지 않는다.
+            //   "보조 신호 없이 갑자기 나타난 정지 물체" 를 suspect 로 올릴지
+            //   결정하는 게이트인데, 반사 스파이크가 정확히 그 모양이다.
+            //   3→2 로 낮췄더니 회귀 K_reflective_spike_near_path 가 투기로
+            //   확정됐다. 사람이 내려놓은 쓰레기는 분리 신호(폭 감소/분열/
+            //   궤적 근접)가 함께 오므로 이 게이트를 안 거쳐도 잡힌다.
+        } else if (sens == "low") {
+            tp.dump_frames_tiny   = 8;
+            tp.dump_frames_small  = 8;
+            tp.dump_frames_medium = 6;
+            tp.dump_frames_large  = 5;
+            tp.dump_frames_xl     = 5;
+            tp.dump_confirm_min_total_matches = 6;
+            tp.source_lost_confirm_frames     = 10;
+        }
+        // normal 은 구조체 기본값 그대로
+    }
+
+    // 개별 오버라이드 (프리셋보다 우선)
+    tp.min_dump_candidate_width_mm = EnvDouble(
+        "ECOWARDEN_DUMP_MIN_WIDTH_MM", tp.min_dump_candidate_width_mm);
+    tp.dump_candidate_max_width_mm = EnvDouble(
+        "ECOWARDEN_DUMP_MAX_WIDTH_MM", tp.dump_candidate_max_width_mm);
+    tp.dump_frames_tiny   = EnvU32("ECOWARDEN_DUMP_FRAMES_TINY",
+                                   tp.dump_frames_tiny);
+    tp.dump_frames_small  = EnvU32("ECOWARDEN_DUMP_FRAMES_SMALL",
+                                   tp.dump_frames_small);
+    tp.dump_frames_medium = EnvU32("ECOWARDEN_DUMP_FRAMES_MEDIUM",
+                                   tp.dump_frames_medium);
+    tp.dump_frames_large  = EnvU32("ECOWARDEN_DUMP_FRAMES_LARGE",
+                                   tp.dump_frames_large);
+    tp.dump_frames_xl     = EnvU32("ECOWARDEN_DUMP_FRAMES_XL",
+                                   tp.dump_frames_xl);
+    // 반사 오탐과 직결되는 값 — 내리면 오탐이 확 는다. 기본 유지 권장.
+    tp.trajectory_birth_suspect_min_stationary_frames = EnvU32(
+        "ECOWARDEN_TRAJECTORY_BIRTH_SUSPECT_MIN_STATIONARY_FRAMES",
+        tp.trajectory_birth_suspect_min_stationary_frames);
     return tp;
 }
 
@@ -262,6 +328,33 @@ inline ZonePolicyParams DefaultZonePolicyParams() {
 // ── DumpValidator: 투기 확정 후 재검증 (오탐 차단) ──────────────────
 inline DumpValidationParams DefaultDumpValidationParams() {
     DumpValidationParams dv;
+
+    // 감지 감도와 함께 움직인다. high 에서 재검증이 빡빡하면 애써 확정한
+    // 투기를 다시 취소해 버려서 감도를 올린 의미가 없어진다.
+    //   - 관찰 창을 30→20프레임(3초→2초)으로 줄여 확정이 빨리 나가고
+    //   - 재관측 비율 하한을 0.5→0.3 으로 낮추고 (LiDAR 가 몇 프레임 놓쳐도 통과)
+    //   - 허용 이동량을 300→500mm 로 넓힌다 (centroid 흔들림 흡수)
+    //     실제로 현장 로그에서 object 15 가 "300mm 초과 이동" 으로 취소됐다.
+    {
+        const std::string sens =
+            EnvString("ECOWARDEN_DUMP_SENSITIVITY", "high");
+        if (sens == "high") {
+            // 관찰 창은 줄이고(확정이 빨리 나감) 이동 허용은 넓히되,
+            // **재관측 비율은 낮추지 않는다.**
+            //   이 비율이 반사·고스트를 걸러내는 유일한 장치다. 감지 게이트와
+            //   함께 풀어 버리면 안전망이 사라진다 — 실제로 0.3 으로 낮췄더니
+            //   회귀 K_reflective_spike_near_path(반사 스파이크)가 투기로
+            //   확정됐다. 젖은 바닥·유리·금속이 많은 현장에서는 이게 계속 뜬다.
+            dv.validate_frames    = 20;
+            dv.min_present_ratio  = 0.5;
+            dv.max_move_mm        = 500.0;
+        } else if (sens == "low") {
+            dv.validate_frames    = 40;
+            dv.min_present_ratio  = 0.6;
+            dv.max_move_mm        = 250.0;
+        }
+    }
+
     dv.enable = EnvBool("ECOWARDEN_DUMP_VALIDATE", dv.enable);
     dv.validate_frames = EnvU32("ECOWARDEN_DUMP_VALIDATE_FRAMES",
                                 dv.validate_frames);
