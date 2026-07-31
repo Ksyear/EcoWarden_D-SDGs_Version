@@ -1,5 +1,7 @@
 #pragma once
 
+#include "evidence_vault.h"
+#include "face_masking.h"
 #include "head_label.h"
 
 #include <atomic>
@@ -67,6 +69,27 @@ public:
     // DefaultHeadLabelParams() 사용. 미호출 시 기본값으로 동작).
     void ConfigureHeadLabel(const HeadLabelParams& params);
 
+    /**
+     * @brief 얼굴 마스킹 설정 — Start() 전에 호출한다.
+     *
+     *   프라이버시 2계층. 저장·전송되는 모든 프레임에 적용된다.
+     *   fail-closed 이므로, 마스킹이 요구됐는데 검출기가 없고 폴백도
+     *   꺼져 있으면 **사진을 저장하지 않는다**(빈 문자열 반환).
+     */
+    void ConfigureFaceMask(const FaceMaskParams& params);
+
+    // 마스킹 백엔드 이름 ("dnn" | "haar" | "fallback" | "none")
+    const char* FaceMaskBackend() const;
+
+    /**
+     * @brief 원본 암호화 보관소 연결 — Start() 전에 호출한다.
+     *
+     *   프라이버시 3계층. 설정하면 **마스킹 전** 원본을 vault 에
+     *   암호화 저장한다. 소유권은 넘기지 않으므로 vault 의 수명이
+     *   CameraModule 보다 길어야 한다. nullptr 이면 원본을 남기지 않는다.
+     */
+    void SetEvidenceVault(EvidenceVault* vault);
+
     // 스레드 시작/정지
     bool Start();
     void Stop();
@@ -102,6 +125,16 @@ private:
     void BlackboxSaveWorker(std::string path, int64_t event_ms,
                             BlackboxClipMeta meta);
 
+    /**
+     * @brief 증거 프레임 공통 전처리 — ① 원본 vault 보관 ② 얼굴 마스킹.
+     * @param frame_mat  `cv::Mat*`
+     * @param vault_name vault 파일명 베이스 (비면 원본 보관 생략)
+     * @return 이 프레임을 저장·전송해도 되는가 (fail-closed 판정 결과)
+     *
+     *   반드시 배너·ID 라벨을 그리기 **전에** 호출해야 라벨이 블러되지 않는다.
+     */
+    bool PrepareEvidenceFrame(void* frame_mat, const std::string& vault_name);
+
     int device_id_;
     std::string capture_dir_;
 
@@ -122,6 +155,12 @@ private:
     };
     BlackboxParams blackbox_;
     HeadLabelParams head_label_;
+
+    // ── 프라이버시 2·3계층 ──────────────────────────────────────────
+    FaceMaskParams face_mask_params_;
+    std::unique_ptr<FaceMasker> face_masker_;   // Start() 시 생성
+    EvidenceVault* evidence_vault_ = nullptr;   // 소유하지 않음
+
     BlackboxSavedCallback blackbox_saved_cb_;
     std::mutex blackbox_mutex_;
     std::deque<BlackboxFrame> blackbox_buf_;

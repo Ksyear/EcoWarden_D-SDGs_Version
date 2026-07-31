@@ -55,6 +55,27 @@ find_package(Threads REQUIRED)
 find_package(OpenCV QUIET)
 if(OpenCV_FOUND)
   add_definitions(-DUSE_OPENCV)
+  # dnn 모듈이 있어야 얼굴 마스킹 DNN 백엔드 / 객체 분류 AI 를 쓸 수 있다.
+  # 없으면 Haar cascade + LiDAR 휴리스틱으로 자동 폴백한다.
+  if("dnn" IN_LIST OpenCV_LIBS OR TARGET opencv_dnn
+     OR "opencv_dnn" IN_LIST OpenCV_LIBS)
+    add_definitions(-DHAVE_OPENCV_DNN)
+    message(STATUS "OpenCV dnn 모듈 사용 가능 — 얼굴 마스킹 DNN / 객체 분류 AI 활성")
+  else()
+    message(STATUS "OpenCV dnn 모듈 없음 — Haar cascade + LiDAR 휴리스틱으로 동작")
+  endif()
+else()
+  message(STATUS "OpenCV 없음 — 카메라·마스킹 경로는 스텁으로 컴파일됩니다")
+endif()
+
+# ── OpenSSL: 증거 원본 암호화 보관(프라이버시 3계층) ────────────────
+#   없으면 EvidenceVault 가 fail-closed 로 동작한다 — 평문 보관은 하지 않는다.
+find_package(OpenSSL QUIET)
+if(OpenSSL_FOUND OR OPENSSL_FOUND)
+  add_definitions(-DUSE_OPENSSL)
+  message(STATUS "OpenSSL found: ${OPENSSL_VERSION} — 증거 원본 AES-256-GCM 암호화 활성")
+else()
+  message(WARNING "OpenSSL 없음 — 증거 원본 암호화 보관 비활성 (fail-closed: 원본을 저장하지 않음). 설치: apt install libssl-dev")
 endif()
 
 # ── libgpiod: RPi5 GPIO 지원 (sysfs 대체) ──────────────────────────
@@ -87,6 +108,13 @@ else()
   message(STATUS "nlohmann_json found via system package")
 endif()
 
+# 프라이버시·AI 모듈 — 카메라를 쓰는 모든 타깃이 함께 링크해야 한다
+# (camera_module.cpp 가 FaceMasker / EvidenceVault 를 참조하므로).
+set(PRIVACY_SOURCES
+  src/face_masking.cpp
+  src/evidence_vault.cpp
+)
+
 set(APP_SOURCES
   src/rplidar_s2.cpp
   src/scan_processor.cpp
@@ -98,6 +126,8 @@ set(APP_SOURCES
   src/pir_sensor.cpp
   src/camera_module.cpp
   src/servo_controller.cpp
+  src/object_classifier.cpp
+  ${PRIVACY_SOURCES}
   src/main.cpp
 )
 
@@ -108,6 +138,10 @@ target_link_libraries(rplidar_app PRIVATE rplidar_sdk CURL::libcurl nlohmann_jso
 if(OpenCV_FOUND)
   target_include_directories(rplidar_app PRIVATE ${OpenCV_INCLUDE_DIRS})
   target_link_libraries(rplidar_app PRIVATE ${OpenCV_LIBS})
+endif()
+
+if(OpenSSL_FOUND OR OPENSSL_FOUND)
+  target_link_libraries(rplidar_app PRIVATE OpenSSL::Crypto)
 endif()
 
 if(USE_GPIOD)
@@ -125,24 +159,31 @@ add_executable(check_lidar test/test_lidar.cpp src/rplidar_s2.cpp)
 target_include_directories(check_lidar PRIVATE ${CMAKE_SOURCE_DIR}/include ${RPLIDAR_SDK_INCLUDE_DIRS})
 target_link_libraries(check_lidar PRIVATE rplidar_sdk Threads::Threads)
 
-add_executable(check_camera test/test_camera.cpp src/camera_module.cpp)
+add_executable(check_camera test/test_camera.cpp src/camera_module.cpp ${PRIVACY_SOURCES})
 target_include_directories(check_camera PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(check_camera PRIVATE Threads::Threads)
 if(OpenCV_FOUND)
   target_include_directories(check_camera PRIVATE ${OpenCV_INCLUDE_DIRS})
   target_link_libraries(check_camera PRIVATE ${OpenCV_LIBS})
 endif()
+if(OpenSSL_FOUND OR OPENSSL_FOUND)
+  target_link_libraries(check_camera PRIVATE OpenSSL::Crypto)
+endif()
 
 add_executable(servo_sweep_test
   test/servo_sweep_test.cpp
   src/servo_controller.cpp
   src/camera_module.cpp
+  ${PRIVACY_SOURCES}
 )
 target_include_directories(servo_sweep_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(servo_sweep_test PRIVATE Threads::Threads)
 if(OpenCV_FOUND)
   target_include_directories(servo_sweep_test PRIVATE ${OpenCV_INCLUDE_DIRS})
   target_link_libraries(servo_sweep_test PRIVATE ${OpenCV_LIBS})
+endif()
+if(OpenSSL_FOUND OR OPENSSL_FOUND)
+  target_link_libraries(servo_sweep_test PRIVATE OpenSSL::Crypto)
 endif()
 
 # 카메라/LiDAR 의존 0 — sysfs PWM만 직접 두드리는 최소 서보 테스트
@@ -155,5 +196,11 @@ add_executable(rplidar_sim
   src/scan_processor.cpp
   src/background_filter.cpp
   src/cluster_tracker.cpp
+  src/object_classifier.cpp
+  src/evidence_vault.cpp
+  src/face_masking.cpp
 )
 target_include_directories(rplidar_sim PRIVATE ${CMAKE_SOURCE_DIR}/include)
+if(OpenSSL_FOUND OR OPENSSL_FOUND)
+  target_link_libraries(rplidar_sim PRIVATE OpenSSL::Crypto)
+endif()

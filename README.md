@@ -7,24 +7,26 @@
 1. **비식별 통행 추적 + 사람↔물체 구별** — 10Hz LiDAR 점군 → DBSCAN 클러스터링 + 칼만 필터 추적 → Unity 대시보드에 트랙 ID·이동 경로 실시간 표시. 트래커가 사람(PersonGroup)과 투기물(object)을 분리
 2. **불법 투기 감지** — 다단계 투기 판정 FSM으로 투기 행위 확정·증거화 (§4.6). LiDAR/카메라는 **1차 스크리닝**으로 후보를 잡고, 최종 판단은 관리자가 증거 사진으로 확인하는 구조
 3. **증거 보존** — ID/UTC시각 오버레이 사진 + 사람 머리 위 `ID:` 라벨, 이벤트 전후 10초 블랙박스 AVI, FastAPI 전송 + 실패 시 로컬 큐잉 (§3.8)
-4. **확장(옵션): 금지구역 침입 감지** — 5-zone 금지구역 정책, 침입 확정 시 `intrusion` 이벤트 + 서보 조준 촬영 (§3.7). **기본 비활성**(`ECOWARDEN_RESTRICTED_ZONES` 설정 시 활성) — 하천변·시설 보호구역 확장용
+4. **프라이버시 3계층 (v56)** — ① 평상시 무촬영 ② 증거 사진 **얼굴 자동 마스킹**(fail-closed) ③ 마스킹 전 원본 **AES-256-GCM 암호화 보관 + 보존기한 자동 파기 + 열람 로그** (§3.9)
+5. **객체 분류 · 이벤트 등급 (v56)** — 사람/동물/불명 분류 후 `high`/`medium`/`low`/`ignore` 등급 산정. 카메라 DNN 백엔드 + LiDAR 기하 휴리스틱 2단 구조 (§3.10)
+6. **확장(옵션): 금지구역 침입 감지** — 5-zone 금지구역 정책, 침입 확정 시 `intrusion` 이벤트 + 서보 조준 촬영 (§3.7). **기본 비활성**(`ECOWARDEN_RESTRICTED_ZONES` 설정 시 활성) — 하천변·시설 보호구역 확장용
 
-탐지는 **지능형 다중 센서 융합 알고리즘**(DBSCAN 클러스터링 + 칼만 필터 추적 + 존 정책 + 다단계 판정 FSM) 기반입니다. 학습형 신경망 모델은 임베디드에 탑재하지 않으며, 확정 증거 사진이 서버로 전송되므로 서버 측에서 사람/동물/불명 분류 AI(카메라 AI)로 2차 검증을 붙이는 확장이 가능합니다 — 고도화 계획은 `보안/전체_구조.md` 참조.
+탐지는 **지능형 다중 센서 융합 알고리즘**(DBSCAN 클러스터링 + 칼만 필터 추적 + 존 정책 + 다단계 판정 FSM) 기반입니다. v56에서 사람/동물/불명 **객체 분류기**가 추가됐는데, 기본 동작은 여전히 규칙 기반(LiDAR 기하 휴리스틱)이며 **학습형 신경망은 모델 파일을 명시적으로 지정했을 때만** 동작합니다(`ECOWARDEN_CLASSIFY_MODEL`). 모델이 없으면 휴리스틱으로 자동 폴백하고 신뢰도 상한이 낮게 적용됩니다 — 즉 "AI 기반"이라는 표현은 모델을 붙였을 때만 정확합니다.
 
-**현재 버전**: v54 — 불법 투기 감지(주) + 블랙박스 전후 10초 영상 + 증거 사진 ID/시각 오버레이 + 머리 위 ID 라벨 + 침입 감지(옵션) (자세한 변경 이력은 §9 참조)
+**현재 버전**: v56 — 불법 투기 감지(주) + **프라이버시 3계층(얼굴 마스킹 · 원본 암호화 · 자동 파기)** + **객체 분류/이벤트 등급** + 블랙박스 전후 10초 영상 + 증거 사진 ID/시각 오버레이 + 머리 위 ID 라벨 + 침입 감지(옵션) (자세한 변경 이력은 §9 참조)
 **포지셔닝**: **불법 투기 감지 시스템**(주). 2026-07-04 문서상 '보안 감시'로 전환했다가 **2026-07-08 불법 투기로 재확정** — 금지구역 침입 감지는 같은 플랫폼의 **옵션 확장 기능**(기본 OFF)으로 보존. 발표·시나리오·통신 명세는 `보안/` 폴더 참조.
 
 ---
 
 ## 1. 하드웨어 사양 (Hardware Info)
 
-| 구분            | 상세 모델 및 규격                                                         | 용도                                    |
+| 구분 | 상세 모델 및 규격 | 용도 |
 | :------------ | :----------------------------------------------------------------- | :------------------------------------ |
-| **LiDAR**     | Slamtec RPLiDAR S2 (ToF, 30m)                                      | 실시간 거리 측정, 객체 탐지                      |
-| **Camera**    | [DFROBOT] 2MP USB Night Vision [FIT0730]                           | 비동기 30fps 증거 캡처 (1080p, IR 지원)        |
-| **Servo**     | SG90급 3선 hobby servo (기본: Arduino USB serial / Pi5 단독: GPIO18 PWM) | suspect 좌표 기준 카메라 5-zone pan 조준       |
-| **Sensor**    | Panasonic PaPIRs (EKMC160111) x 2                                  | 정밀 디지털 모션 감지 (좌: GPIO 17, 우: GPIO 27) |
-| **Computing** | Raspberry Pi 5 + Ubuntu Linux                                      | 핵심 로직 및 통신 처리                         |
+| **LiDAR** | Slamtec RPLiDAR S2 (ToF, 30m) | 실시간 거리 측정, 객체 탐지 |
+| **Camera** | [DFROBOT] 2MP USB Night Vision [FIT0730] | 비동기 30fps 증거 캡처 (1080p, IR 지원) |
+| **Servo** | SG90급 3선 hobby servo (기본: Arduino USB serial / Pi5 단독: GPIO18 PWM) | suspect 좌표 기준 카메라 5-zone pan 조준 |
+| **Sensor** | Panasonic PaPIRs (EKMC160111) x 2 | 정밀 디지털 모션 감지 (좌: GPIO 17, 우: GPIO 27) |
+| **Computing** | Raspberry Pi 5 + Ubuntu Linux | 핵심 로직 및 통신 처리 |
 
 ---
 
@@ -41,16 +43,16 @@ Hardware Layer
          │
 Processing Layer (Main Loop, 10Hz target)
 ├─ ScanProcessor
-│  ├─ FilterNoise (distance/intensity/FOV gate)
-│  ├─ FilterStaticBackground (confidence + neighbor edge guard)
-│  ├─ ToCartesian (polar → x/y mm)
-│  ├─ DBSCAN (ε=100mm, min_pts=3, grid O(n))
-│  └─ LearnStaticBackground (EMA alpha=0.02, tracked-object 슬롯 + edge guard 보호)
+│ ├─ FilterNoise (distance/intensity/FOV gate)
+│ ├─ FilterStaticBackground (confidence + neighbor edge guard)
+│ ├─ ToCartesian (polar → x/y mm)
+│ ├─ DBSCAN (ε=100mm, min_pts=3, grid O(n))
+│ └─ LearnStaticBackground (EMA alpha=0.02, tracked-object 슬롯 + edge guard 보호)
 │
 ├─ BackgroundFilter
-│  ├─ LearnFrame (50-frame warmup, 30% threshold)
-│  ├─ FilterBackground (radius: 80mm)
-│  └─ 학습 중에도 시각화 데이터 전송 (점구름 + 빈 트랙)
+│ ├─ LearnFrame (50-frame warmup, 30% threshold)
+│ ├─ FilterBackground (radius: 80mm)
+│ └─ 학습 중에도 시각화 데이터 전송 (점구름 + 빈 트랙)
 │
 └─ ClusterTracker (7-Phase Dumping FSM)
    ├─ Phase 0.5: KF Predict (전 트랙 1회)
@@ -65,16 +67,31 @@ Processing Layer (Main Loop, 10Hz target)
    └─ Phase 7: CheckDumpingConfirmation
          │
 ├─ ZonePolicy (금지구역 정책 — ECOWARDEN_RESTRICTED_ZONES 설정 시)
-│  └─ 사람 트랙의 존이 금지 존에 연속 N프레임 관측되면 intrusion 이벤트
+│ └─ 사람 트랙의 존이 금지 존에 연속 N프레임 관측되면 intrusion 후보
+         │
+├─ ObjectClassifier (v56, §3.10)
+│ ├─ DNN 백엔드 (ECOWARDEN_CLASSIFY_MODEL 지정 시) ─┐
+│ ├─ LiDAR 기하 휴리스틱 (폴백, 신뢰도 상한 0.7) ───┤
+│ └─ GradeEvent() → high / medium / low / ignore ◄─┘
+│ └─ ignore(noise) 면 이벤트를 전송하지 않고 종료
          │
 Output Layer
-├─ JsonPacketSender → Unity UDP (JSON, 기본 192.168.20.173:5005)
+├─ JsonPacketSender → Unity UDP (JSON, 기본 192.168.20.102:5005)
 ├─ JsonPacketSender → 시각화기 UDP (JSON, 127.0.0.1:9090)
-├─ UdpSender       → Unity 바이너리 프로토콜 (옵션, ECOWARDEN_UNITY_BINARY=1)
-├─ EventNotifier   → HTTP POST dumping-event / intrusion-event (X-API-Key)
+├─ UdpSender → Unity 바이너리 프로토콜 (옵션, ECOWARDEN_UNITY_BINARY=1)
+├─ EventNotifier → HTTP POST dumping-event / intrusion-event (X-API-Key)
+│ └─ v56: 키 없으면 전송 안 하고 로컬 큐 보존 (fail-closed)
 ├─ ServoController → suspect/person 좌표를 5-zone으로 변환해 카메라 조준/저장
-└─ CameraModule    → JPEG capture (ID/존/시각 오버레이) + 블랙박스 AVI (전후 10초)
+└─ CameraModule → PrepareEvidenceFrame() → JPEG / 블랙박스 AVI
+      │ ① EvidenceVault : 마스킹 前 원본을 AES-256-GCM 암호화 보관 (v56, §3.9)
+      │ ② FaceMasker : 얼굴 검출 → 블러 (v56, fail-closed)
+      │ ③ 배너·머리 위 ID 라벨 렌더링 ← 반드시 마스킹 後
+      └─→ 저장·전송되는 것은 항상 "마스킹본"
 ```
+
+> **순서가 중요하다**: 마스킹을 라벨보다 나중에 하면 ID 라벨까지 블러 처리된다.
+> 그리고 마스킹이 요구됐는데 검출기가 없으면 `PrepareEvidenceFrame()` 이 false 를
+> 돌려 **사진 저장 자체를 건너뛴다** — 원본이 새어 나갈 경로를 만들지 않는다.
 
 ### 2.2 Source of Truth (데이터 무결성의 근간)
 
@@ -122,31 +139,31 @@ Clean Detection (verified)
 |------|------|--------|------|
 | 1 | LiDAR 시리얼 포트 | `/dev/ttyUSB0` | |
 | 2 | FastAPI 엔드포인트 | `https://api.ecowarden.systems/api/dumping-event` | |
-| 3 | Unity 주소 | `192.168.20.173:5005` | 와이파이 변경 시 IP 수정 필요 |
+| 3 | Unity 주소 | `192.168.20.102:5005` | 와이파이 변경 시 IP 수정 필요 |
 | 4 | 시각화기 주소 | `127.0.0.1:9090` | localhost이므로 변경 불필요 |
 
 ### 3.3 실행 예시
 
 ```bash
-# 기본값으로 실행 (Unity IP가 192.168.20.173일 때)
+# 기본값으로 실행 (Unity IP가 192.168.20.102일 때)
 ./build/rplidar_app
 
 # Unity PC IP가 바뀌었을 때
-./build/rplidar_app /dev/ttyUSB0 https://api.ecowarden.systems/api/dumping-event 192.168.20.173:5005
+./build/rplidar_app /dev/ttyUSB0 https://api.ecowarden.systems/api/dumping-event 192.168.20.102:5005
 
 # 시각화기 (별도 터미널) — 레이더 화면 + 우측 '수신 데이터 값' 패널
-#   d: 데이터 패널 토글, c: 이벤트 로그 클리어, q/ESC: 종료
-#   침입(intrusion) 이벤트 수신 시 해당 존을 빨간 부채꼴로 5초 강조
+# d: 데이터 패널 토글, c: 이벤트 로그 클리어, q/ESC: 종료
+# 침입(intrusion) 이벤트 수신 시 해당 존을 빨간 부채꼴로 5초 강조
 python3 lidar_visualizer.py
 ```
 
 ### 3.4 네트워크 구조
 
 ```
-rplidar_app ──UDP JSON──→ Unity PC (192.168.20.173:5005)   ← 와이파이 IP 의존
+rplidar_app ──UDP JSON──→ Unity PC (192.168.20.102:5005) ← 와이파이 IP 의존
             ──UDP 바이너리→ Unity PC (ECOWARDEN_UNITY_BINARY=1일 때만)
-            ──UDP JSON──→ localhost:9090 (시각화기)            ← 와이파이 무관
-            ──HTTPS────→ api.ecowarden.systems (FastAPI)     ← DNS, 와이파이 무관
+            ──UDP JSON──→ localhost:9090 (시각화기) ← 와이파이 무관
+            ──HTTPS────→ api.ecowarden.systems (FastAPI) ← DNS, 와이파이 무관
 ```
 
 - **Unity UDP와 시각화기 UDP는 독립 소켓** — Unity가 꺼져 있어도 시각화기는 정상 동작
@@ -196,6 +213,50 @@ rplidar_app ──UDP JSON──→ Unity PC (192.168.20.173:5005)   ← 와이�
 | `ECOWARDEN_CLIP_TIMEOUT_MS` | 기본 `120000` | 클립(수십 MB) 전용 업로드 타임아웃 |
 | `ECOWARDEN_API_KEY` | (비밀값) | FastAPI `X-API-Key`. 미설정 시 노출된 레거시 키로 fallback + 경고 로그 |
 | `ECOWARDEN_QUEUE_FILE` | 기본 `/tmp/rplidar_event_queue.jsonl` | 전송 실패 이벤트 큐 파일 경로. 운영 배포는 `/var/lib/ecowarden/` 권장 |
+
+#### 프라이버시 2계층 — 얼굴 마스킹 (v56, §3.9)
+
+| 환경변수 | 기본값 | 설명 |
+|------|------|------|
+| `ECOWARDEN_FACE_MASK` | `1` | 얼굴 마스킹 on/off. **끄면 원본이 그대로 전송된다** |
+| `ECOWARDEN_FACE_MASK_MODE` | `blur` | `blur` \| `pixelate` \| `box` |
+| `ECOWARDEN_FACE_MASK_REQUIRE` | `1` | **fail-closed** — 검출기 없으면 원본을 내보내지 않음 |
+| `ECOWARDEN_FACE_MASK_FALLBACK` | `1` | 검출기 없을 때 상단 영역 통째 마스킹. `0`이면 사진 저장 자체를 건너뜀 |
+| `ECOWARDEN_FACE_MASK_FALLBACK_RATIO` | `0.45` | 폴백 마스킹 영역 (화면 높이 대비) |
+| `ECOWARDEN_FACE_MASK_CASCADE` | (자동 탐색) | Haar cascade XML 경로 |
+| `ECOWARDEN_FACE_MASK_DNN_CONFIG` / `_DNN_WEIGHTS` | (없음) | DNN 백엔드. 둘 다 지정 시 Haar보다 우선 |
+| `ECOWARDEN_FACE_MASK_STRENGTH` | `0.35` | blur 강도 (ROI 짧은 변 대비 커널 비율) |
+| `ECOWARDEN_FACE_MASK_BLOCKS` | `10` | pixelate 블록 수 (작을수록 강함) |
+| `ECOWARDEN_FACE_MASK_EXPAND` | `0.25` | 검출 박스 확장 비율 (머리카락·턱선 포함) |
+| `ECOWARDEN_FACE_MASK_MIN_PX` | `24` | 이보다 작은 얼굴은 무시 |
+
+#### 프라이버시 3계층 — 원본 암호화 보관 (v56, §3.9)
+
+| 환경변수 | 기본값 | 설명 |
+|------|------|------|
+| `ECOWARDEN_EVIDENCE_VAULT` | `0` | 원본 보관 on/off. **켜려면 키가 필요** (없으면 fail-closed) |
+| `ECOWARDEN_EVIDENCE_KEY` | (비밀값) | AES-256 키 hex 64자. `openssl rand -hex 32` |
+| `ECOWARDEN_EVIDENCE_KEY_FILE` | `/etc/ecowarden/secrets.conf` | 키 파일 경로 |
+| `ECOWARDEN_EVIDENCE_DIR` | `captures/vault` | 암호화 원본 저장 위치 |
+| `ECOWARDEN_EVIDENCE_LOG` | `captures/vault/access.log` | 열람 로그 (append-only) |
+| `ECOWARDEN_EVIDENCE_RETAIN_DAYS` | `30` | 보존 일수. `0`이면 무기한(비권장) |
+
+#### 객체 분류 · 이벤트 등급 (v56, §3.10)
+
+| 환경변수 | 기본값 | 설명 |
+|------|------|------|
+| `ECOWARDEN_CLASSIFY` | `1` | 분류 on/off |
+| `ECOWARDEN_CLASSIFY_MODEL` | (없음) | DNN 모델(.onnx/.caffemodel). **지정해야 "AI 기반"이 정확** |
+| `ECOWARDEN_CLASSIFY_CONFIG` / `_LABELS` | (없음) | DNN 설정·라벨 파일 |
+| `ECOWARDEN_CLASSIFY_CONF` | `0.5` | DNN 신뢰도 임계 |
+| `ECOWARDEN_CLASSIFY_LIDAR_CAP` | `0.7` | LiDAR 휴리스틱 신뢰도 **상한** (과장 방지) |
+| `ECOWARDEN_CLASSIFY_PERSON_MIN_W` / `_MAX_W` | `150` / `900` | 사람 폭 대역 (mm) |
+| `ECOWARDEN_CLASSIFY_PERSON_MIN_V` / `_MAX_V` | `300` / `2200` | 사람 보행 속도 대역 (mm/s) |
+| `ECOWARDEN_CLASSIFY_ANIMAL_MAX_W` | `450` | 동물 폭 상한 (mm) |
+| `ECOWARDEN_CLASSIFY_ANIMAL_MIN_V` | `400` | 동물 최소 속도 (mm/s) |
+| `ECOWARDEN_CLASSIFY_NOISE_AGE` | `3` | 이보다 짧게 관측되면 noise |
+| `ECOWARDEN_CLASSIFY_PERSON_FRAMES` | `5` | 사람 확정 최소 매칭 프레임 |
+| `ECOWARDEN_CLASSIFY_STATIC_FRAMES` | `10` | 정지 물체 판정 프레임 |
 
 #### 런타임 시그널
 
@@ -269,6 +330,61 @@ sudo env ECOWARDEN_RESTRICTED_ZONES=3,4 ./build/rplidar_app
 
 **서버 업로드 (v54)**: 클립 저장이 끝나면 전용 업로드 스레드가 `multipart/form-data`로 FastAPI `evidence-clip` endpoint에 자동 전송한다 (`event_type`/`person_id`/`event_time` 필드로 이벤트 레코드와 연결). 사진(base64)은 이벤트 순간 즉시, 영상은 완성 후(+10초~) 따라가는 2단 구조다. 업로드가 실패해도 파일은 기기에 남고, 서버 준비 전에는 `ECOWARDEN_CLIP_UPLOAD=0`으로 끈다. 형식 상세는 [`보안/통신_명세.md`](보안/통신_명세.md) §4.4.
 
+### 3.9 프라이버시 3계층 — 얼굴 마스킹 · 원본 암호화 (v56)
+
+증거 사진이 기기 밖으로 나가는 모든 경로(`CaptureBase64` / `CaptureToFile` / `CaptureToFilePath`)에 동일하게 적용된다.
+
+| 계층 | 내용 | 구현 | 기본값 |
+|------|------|------|--------|
+| **1계층 평상시** | 카메라 미작동, 비식별 LiDAR 좌표만 | 구조적 보장 | 항상 |
+| **2계층 공개본** | 증거 사진 **얼굴 자동 마스킹** 후 저장·전송 | `include/face_masking.h` | **ON** |
+| **3계층 원본** | 마스킹 전 원본 **AES-256-GCM 암호화** + 보존기한 자동 파기 + 열람 로그 | `include/evidence_vault.h` | OFF (키 설정 후 켬) |
+
+**처리 순서** — `CameraModule::PrepareEvidenceFrame()`:
+1. 원본 JPEG를 vault에 암호화 저장 (마스킹 전 상태여야 3계층의 의미가 있음)
+2. 얼굴 검출 → 블러/모자이크/박스 처리
+3. 그 다음에 배너·머리 위 ID 라벨을 그린다 (반대로 하면 라벨까지 블러됨)
+
+**fail-closed 설계**: 마스킹이 켜져 있는데 검출기를 로드하지 못하면 원본을 그대로 내보내지 않는다. `ECOWARDEN_FACE_MASK_FALLBACK=1`(기본)이면 화면 상단을 통째로 마스킹하고, `0`이면 **사진 저장 자체를 건너뛴다**. "마스킹한다고 말해 놓고 실제로는 원본이 나가는" 상황을 구조적으로 막는다.
+
+검출기 우선순위: DNN(`_DNN_CONFIG`+`_DNN_WEIGHTS` 지정 시) → Haar cascade(자동 탐색) → fail-closed 폴백.
+
+**vault 파일 포맷**: `EWV1` 매직 + 생성시각 + 보존일수 + nonce + GCM tag + 암호문. 헤더를 AAD로 묶어 **메타데이터 위·변조도 검출**된다(목표 16 증거 무결성 근거). 복호화할 때마다 `access.log`에 시각·사유·요청자가 append된다.
+
+```bash
+# 키 생성 후 3계층 활성화
+openssl rand -hex 32 # 64자 hex 출력
+echo "ECOWARDEN_EVIDENCE_KEY=<위 값>" | sudo tee -a /etc/ecowarden/secrets.conf
+export ECOWARDEN_EVIDENCE_VAULT=1
+```
+
+OpenSSL 없이 빌드하면 vault는 **평문 폴백 없이 비활성**된다 (원본을 아예 저장하지 않음).
+
+### 3.10 객체 분류 · 이벤트 등급 (v56)
+
+`보안/전체_구조.md` §5·§6이 스펙만 정의하고 비어 있던 부분의 구현이다.
+
+**2단 백엔드**:
+| 백엔드 | 조건 | 신뢰도 |
+|--------|------|--------|
+| `dnn` | `ECOWARDEN_CLASSIFY_MODEL` 지정 + OpenCV dnn 모듈 | 모델 출력 그대로 |
+| `lidar_geom` | 항상 사용 가능 (폴백) | `ECOWARDEN_CLASSIFY_LIDAR_CAP`(기본 0.7) 상한 |
+
+**등급 산정** (`GradeEvent`):
+| 분류 | severity | 이벤트 타입 |
+|------|----------|------------|
+| `person` (conf ≥ 0.5) | `high` | `intrusion` |
+| `person` (conf < 0.5) | `medium` | `intrusion` |
+| `unknown` | **`medium`** | `unknown_object` |
+| `animal` / `static_object` | `low` | `animal_or_small_object` |
+| `noise` | `ignore` (전송 안 함) | — |
+
+금지구역 안이면 한 단계 상향(`low`→`medium`, `medium`→`high`). `noise`는 상향하지 않는다.
+
+**설계 원칙 — "모르면 올린다"**: `unknown`은 `low`가 아니라 `medium`이다. 미탐(진짜 사건을 놓침)이 오탐보다 비싸다는 프로젝트 전제와 같다.
+
+**사람↔동물 겹침 대역 처리**: 15cm 높이에서 중형견 단면(~250mm)과 사람 다리 하나(~150mm)는 2D LiDAR로 구분되지 않는다. 그래서 겹치는 구간은 **동물로 내리지 않는다** — 동물로 잘못 내리면 severity가 `low`로 떨어져 진짜 사람을 놓치기 때문이다. 동물 판정은 ① 사람 최소폭 미만 + 이동 중, ② 보행 속도 상한 초과 + 좁은 단면 — 두 경우만 한다. 회귀 테스트 `OC_object_classifier_unit` Case D3이 이 동작을 고정한다.
+
 ---
 
 ## 4. 핵심 알고리즘 (Core Algorithms)
@@ -331,7 +447,7 @@ sudo env ECOWARDEN_RESTRICTED_ZONES=3,4 ./build/rplidar_app
 - **서버 전송과 Unity `dumping` 이벤트만** 기본 30프레임(약 3초) 잔존 확인 후 내보낸다
 - 통과 시 페이로드에 `confidence`(`"high"`: 재관측 ≥80% + 투기자 이탈 / `"medium"`)와 `validated_frames`/`validate_window` 필드 추가 → **관리자가 "얼마나 확실한 확정인지" 보고 검토 우선순위를 정할 수 있다** (additive 필드 — 기존 서버 호환)
 - 취소 시 `[DUMP-CANCEL]` 로그만 남고 전송·표시되지 않는다 (사라짐 = 고스트/반사, 300mm 초과 이동 = 정지 투기물 아님). 로컬 증거 파일은 원인 분석용으로 유지
-- 구현: `include/dump_validation.h` (header-only) + `DV_dump_validation_unit` 단위 테스트. dump_detector FSM·기존 회귀 29종은 변경 없음
+- 구현: `include/dump_validation.h` (header-only) + `DV_dump_validation_unit` 단위 테스트. dump_detector FSM·기존 회귀 시나리오 28종은 변경 없음
 
 ---
 
@@ -437,11 +553,11 @@ cmake -DCMAKE_BUILD_TYPE=Release ..
 make -j$(nproc)
 
 # 타겟
-rplidar_app    # 프로덕션 바이너리
-rplidar_sim    # 회귀 테스트 (exit code = fail count)
-check_lidar    # USB 센서 테스트
-check_camera   # 카메라 테스트
-check_pir      # PIR 센서 테스트 (EKMC160111 x2, GPIO 17/27)
+rplidar_app # 프로덕션 바이너리
+rplidar_sim # 회귀 테스트 (exit code = fail count)
+check_lidar # USB 센서 테스트
+check_camera # 카메라 테스트
+check_pir # PIR 센서 테스트 (EKMC160111 x2, GPIO 17/27)
 ```
 
 ### 초기 설정 (Raspberry Pi)
@@ -477,7 +593,7 @@ chmod +x setup.sh && ./setup.sh
 ```ini
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/rplidar_app /dev/ttyUSB0 https://api.ecowarden.systems/api/dumping-event 192.168.20.173:5005
+ExecStart=/usr/local/bin/rplidar_app /dev/ttyUSB0 https://api.ecowarden.systems/api/dumping-event 192.168.20.102:5005
 Environment=ECOWARDEN_DRY_RUN=0
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -522,7 +638,14 @@ ProtectSystem=strict
 | ZP | zone_policy_unit | - | 금지구역 정책 단위 테스트 (파싱/연속 프레임/재알림/리셋/비활성) | 전체 assertion PASS |
 | DV | dump_validation_unit | - | 투기 확정 재검증 단위 테스트 (잔존→high/이탈, 고스트 취소, 이동 취소, source 잔류→medium, 그룹 매칭) | 전체 assertion PASS |
 
-**상태**: 30/30 PASS (v55 verified on Mac)
+| OC | object_classifier_unit | - | 객체 분류 단위 테스트 (노이즈/사람그룹/사람대역/동물 2경로/정지물체/unknown 상향/저신뢰 하향/타입 매핑/비활성) | 전체 assertion PASS |
+| FM | face_mask_unit | - | 얼굴 마스킹 **fail-closed 계약** 단위 테스트 (모드 파싱, 안전한 기본값, 검출기 없을 때 원본 미출력, 명시적 비활성 시 허용) | 전체 assertion PASS |
+| EV | evidence_vault_unit | - | 증거 원본 암호화 보관 단위 테스트 (hex 왕복, 키 없음 fail-closed, AES-256-GCM 왕복, 평문 미잔존, **변조 탐지**, 열람 로그, 보존기한 파기) | 전체 assertion PASS |
+
+**상태**: **33/33 PASS** (v56 verified on Mac, 2026-07-31)
+
+> OC·EV는 OpenCV/하드웨어 없이 도는 순수 로직 테스트라 Mac에서 완전 검증된다.
+> EV의 암호화 왕복·변조 탐지는 OpenSSL이 있을 때만 실행되고, 없으면 fail-closed 동작만 검증한다.
 
 ### 하드웨어 테스트
 
@@ -570,7 +693,7 @@ ProtectSystem=strict
 
 | 파일 | 타깃 | 검증 대상 |
 |------|------|----------|
-| `test/sim_main.cpp` | `rplidar_sim` | 추적·침입·투기 회귀 시나리오 28종 + 단위 테스트 2종(존 정책·투기 재검증) (§7) |
+| `test/sim_main.cpp` | `rplidar_sim` | 추적·침입·투기 회귀 시나리오 28종 + 단위 테스트 5종(존 정책·투기 재검증·객체 분류·증거 보관소) (§7) |
 | `test/test_camera.cpp` | `check_camera` | USB 카메라 캡처 |
 | `test/test_lidar.cpp` | `check_lidar` | RPLiDAR S2 USB 연결 |
 | `test/test_pir.cpp` | `check_pir` | PIR 센서 GPIO 17/27 |

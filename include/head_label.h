@@ -4,7 +4,7 @@
  * This software is released under the MIT License.
  * See LICENSE file in the project root for details.
  *
- * Project: LiDAR 기반 사생활 보호형 스마트 보안 감시 시스템
+ * Project: EcoWarden — LiDAR 기반 사생활 보호형 불법 투기 감지 시스템
  * Module : EMBEDDED - 증거 사진 머리 위 ID 라벨 위치 계산
  */
 

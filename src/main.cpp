@@ -4,7 +4,7 @@
  * This software is released under the MIT License.
  * See LICENSE file in the project root for details.
  *
- * Project: 데이터 무결성 보증형 디지털 트윈 관제 플랫폼
+ * Project: EcoWarden — LiDAR 기반 사생활 보호형 불법 투기 감지 시스템
  * Module : EMBEDDED - 메인 루프 (LiDAR + Camera + PIR)
  */
 
@@ -76,7 +76,7 @@ int main(int argc, char *argv[]) {
     // ── 인자 파싱 ────────────────────────────────────────────────────
     const char *serial_port = (argc > 1) ? argv[1] : "/dev/ttyUSB0";
     const char *api_url = (argc > 2) ? argv[2] : "https://api.ecowarden.systems/api/dumping-event";
-    const char *unity_addr = (argc > 3) ? argv[3] : "192.168.20.173:5005";
+    const char *unity_addr = (argc > 3) ? argv[3] : "192.168.20.102:5005";
     const char *viz_addr   = (argc > 4) ? argv[4] : "127.0.0.1:9090";
 
     // ── 1. LiDAR 및 프로세서 설정 ─────────────────────────────────────
@@ -96,6 +96,27 @@ int main(int argc, char *argv[]) {
     ecowarden::BackgroundFilter bg_filter(bgp);
     ecowarden::ClusterTracker  tracker(tp);
 
+    // ── 2.9. 프라이버시 3계층 · 객체 분류 ───────────────────────────
+    //
+    //   1계층(평상시 무촬영)은 구조 자체로 보장되고, 여기서 2·3계층을 켠다.
+    //     2계층 = 얼굴 마스킹 (기본 ON, fail-closed)
+    //     3계층 = 원본 암호화 보관 (기본 OFF — 키를 넣고 명시적으로 켠다)
+    //
+    //   vault 는 camera 보다 먼저 선언해야 수명이 더 길다 (camera 가
+    //   포인터만 들고 있으므로 역순 소멸 시 dangling 이 되면 안 된다).
+    ecowarden::EvidenceVault evidence_vault(
+        ecowarden::DefaultEvidenceVaultParams());
+    if (!evidence_vault.Available() &&
+        !evidence_vault.unavailable_reason().empty()) {
+        std::printf("[VAULT] 원본 보관 비활성 — %s\n",
+                    evidence_vault.unavailable_reason().c_str());
+    }
+
+    const ecowarden::ClassifierParams classifier_params =
+        ecowarden::DefaultClassifierParams();
+    ecowarden::ObjectClassifier classifier(classifier_params);
+    std::printf("[CLASSIFY] 객체 분류 백엔드: %s\n", classifier.BackendName());
+
     // ── 3. 하드웨어 모듈 시작 ────────────────────────────────────────
     ecowarden::CameraModule camera(0);
     camera.SetCaptureDir("captures");
@@ -103,12 +124,31 @@ int main(int argc, char *argv[]) {
         ecowarden::DefaultBlackboxParams();
     camera.ConfigureBlackbox(blackbox_params);
     camera.ConfigureHeadLabel(ecowarden::DefaultHeadLabelParams());
+
+    const ecowarden::FaceMaskParams face_mask_params =
+        ecowarden::DefaultFaceMaskParams();
+    camera.ConfigureFaceMask(face_mask_params);
+    camera.SetEvidenceVault(evidence_vault.Available() ? &evidence_vault
+                                                       : nullptr);
+
     if (!camera.Start()) {
         std::fprintf(stderr, "[ERROR] Camera Start Failed!\n");
-    } else if (blackbox_params.enable) {
-        std::printf("[BLACKBOX] 전 %u초 + 후 %u초 @ %.1ffps 링버퍼 활성\n",
-                    blackbox_params.pre_seconds, blackbox_params.post_seconds,
-                    blackbox_params.fps);
+    } else {
+        if (blackbox_params.enable) {
+            std::printf("[BLACKBOX] 전 %u초 + 후 %u초 @ %.1ffps 링버퍼 활성\n",
+                        blackbox_params.pre_seconds,
+                        blackbox_params.post_seconds, blackbox_params.fps);
+        }
+        if (face_mask_params.enable) {
+            std::printf("[FACEMASK] 얼굴 마스킹 활성 — 백엔드=%s 방식=%s%s\n",
+                        camera.FaceMaskBackend(),
+                        ecowarden::FaceMaskModeToString(face_mask_params.mode),
+                        face_mask_params.require_detector ? " (fail-closed)"
+                                                          : "");
+        } else {
+            std::printf("[FACEMASK] ⚠ 얼굴 마스킹 비활성 "
+                        "(ECOWARDEN_FACE_MASK=1 권장)\n");
+        }
     }
 
     ecowarden::ServoParams servo_params = ecowarden::DefaultServoParams();
@@ -302,6 +342,14 @@ int main(int argc, char *argv[]) {
                          bgp.learning_frames);
         }
 
+        // ── 보존기한 만료 원본 자동 파기 (프라이버시 3계층) ──────────
+        //   10Hz 기준 36,000 프레임 ≈ 1시간마다 한 번 훑는다. 파일 헤더만
+        //   읽고 판정하므로 복호화 비용은 없다.
+        if (evidence_vault.Available() && frame_count > 0 &&
+            frame_count % 36000 == 0) {
+            evidence_vault.SweepExpired();
+        }
+
         ecowarden::ScanFrame frame;
         if (lidar.GetScanFrame(frame) != ecowarden::Error::None) {
             // USB 분리/케이블 불량 등으로 스캔이 연속 실패하면 재연결한다.
@@ -432,8 +480,43 @@ int main(int argc, char *argv[]) {
                     continue;
                 }
 
-                std::printf("\a[!!] RESTRICTED ZONE INTRUSION: person %u in zone %d at (%.0f, %.0f)\n",
-                            pid, zone, px, py);
+                // ── 객체 분류 → 이벤트 등급 (전체_구조.md §6) ────────
+                //   LiDAR 기하 특징으로 사람/동물/불명을 가르고 등급을
+                //   매긴다. noise 로 분류되면 이벤트 자체를 올리지 않아
+                //   반사·스파이크로 인한 헛알림을 줄인다.
+                ecowarden::LidarFeatures lf;
+                lf.width_mm = tr.person_group_id ? tr.person_group_width_mm
+                                                 : tr.width_mm;
+                lf.speed_mm_s =
+                    std::hypot(tr.x_mm - tr.prev_x_mm, tr.y_mm - tr.prev_y_mm) *
+                    10.0;   // 10Hz → mm/s
+                lf.age_frames        = tr.age;
+                lf.match_frames      = tr.total_match_count;
+                lf.stationary_frames = tr.stationary_count;
+                lf.in_person_group   = tr.person_group_id != 0;
+                lf.was_moving        = tr.was_moving;
+
+                const ecowarden::ClassifyResult cr =
+                    classifier.ClassifyFromLidar(lf);
+                const ecowarden::EventSeverity sev =
+                    ecowarden::GradeEvent(cr, /*restricted_zone=*/true);
+
+                if (sev == ecowarden::EventSeverity::kIgnore) {
+                    std::printf("[CLASSIFY] zone %d 이벤트 무시 — %s (%s)\n",
+                                zone, ecowarden::ObjectClassToString(cr.cls),
+                                cr.reason.c_str());
+                    continue;
+                }
+
+                ievt.object_class = ecowarden::ObjectClassToString(cr.cls);
+                ievt.severity     = ecowarden::EventSeverityToString(sev);
+                ievt.event_type   = ecowarden::EventTypeForClass(cr.cls);
+                ievt.classify_confidence = cr.confidence;
+
+                std::printf("\a[!!] RESTRICTED ZONE INTRUSION: person %u in zone %d at (%.0f, %.0f)"
+                            " — %s/%s (%s, conf=%.2f)\n",
+                            pid, zone, px, py, ievt.event_type, ievt.severity,
+                            cr.reason.c_str(), cr.confidence);
                 servo.OnPersonDetected(pid, px, py); // 카메라 즉시 조준
                 notifier.SendIntrusion(ievt, camera.CaptureBase64());
                 ecowarden::BlackboxClipMeta clip_meta;

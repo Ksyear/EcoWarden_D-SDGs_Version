@@ -4,7 +4,7 @@
  * This software is released under the MIT License.
  * See LICENSE file in the project root for details.
  *
- * Project: 데이터 무결성 보증형 디지털 트윈 관제 플랫폼
+ * Project: EcoWarden — LiDAR 기반 사생활 보호형 불법 투기 감지 시스템
  * Module : EMBEDDED - RplidarS2 LiDAR 센서 인터페이스 및 객체 탐지
  */
 
@@ -110,7 +110,7 @@ static constexpr size_t MAX_CLUSTERS_PER_PKT =
 
 // ── UDP 전송 설정 ────────────────────────────────────────────────────
 struct UdpSenderConfig {
-  std::string dest_ip = "192.168.20.173";
+  std::string dest_ip = "192.168.20.102";
   uint16_t dest_port = 5005;
 };
 
