@@ -82,16 +82,25 @@ Output Layer
 ├─ EventNotifier → HTTP POST dumping-event / intrusion-event (X-API-Key)
 │ └─ v56: 키 없으면 전송 안 하고 로컬 큐 보존 (fail-closed)
 ├─ ServoController → suspect/person 좌표를 5-zone으로 변환해 카메라 조준/저장
-└─ CameraModule → PrepareEvidenceFrame() → JPEG / 블랙박스 AVI
-      │ ① EvidenceVault : 마스킹 前 원본을 AES-256-GCM 암호화 보관 (v56, §3.9)
-      │ ② FaceMasker : 얼굴 검출 → 블러 (v56, fail-closed)
-      │ ③ 배너·머리 위 ID 라벨 렌더링 ← 반드시 마스킹 後
-      └─→ 저장·전송되는 것은 항상 "마스킹본"
+└─ CameraModule
+   ├─ 사진 경로  PrepareEvidenceFrame() → JPEG
+   │    (1) EvidenceVault : 마스킹 前 원본을 AES-256-GCM 암호화 보관 (§3.9)
+   │    (2) FaceMasker    : 얼굴 검출 → 블러 + 번호(F1,F2…) 새김, fail-closed
+   │    (3) 배너·머리 위 ID 라벨 렌더링   ← 반드시 마스킹 後
+   │    (4) <이미지>.masks.json 사이드카에 번호·좌표 기록
+   └─ 영상 경로  BlackboxSaveWorker() → MJPG AVI
+        (1) 링버퍼는 원본 JPEG 보관 (메모리에만, 파일로 남지 않음)
+        (2) 디스크에 쓰기 직전 프레임마다 FaceMasker 적용
+        →  저장·업로드되는 사진과 영상은 항상 "마스킹본"
 ```
 
 > **순서가 중요하다**: 마스킹을 라벨보다 나중에 하면 ID 라벨까지 블러 처리된다.
 > 그리고 마스킹이 요구됐는데 검출기가 없으면 `PrepareEvidenceFrame()` 이 false 를
 > 돌려 **사진 저장 자체를 건너뛴다** — 원본이 새어 나갈 경로를 만들지 않는다.
+>
+> **영상도 마찬가지다.** 블랙박스 링버퍼는 10Hz 상시 인코딩이라 거기서 얼굴 검출까지
+> 돌리면 캡처 스레드에 부담이 크다. 그래서 **파일로 쓰는 순간**에만 마스킹한다 —
+> 원본 프레임은 메모리에만 존재하고 디스크에는 남지 않는다.
 
 ### 2.2 Source of Truth (데이터 무결성의 근간)
 
@@ -229,6 +238,10 @@ rplidar_app ──UDP JSON──→ Unity PC (192.168.20.102:5005) ← 와이파
 | `ECOWARDEN_FACE_MASK_BLOCKS` | `10` | pixelate 블록 수 (작을수록 강함) |
 | `ECOWARDEN_FACE_MASK_EXPAND` | `0.25` | 검출 박스 확장 비율 (머리카락·턱선 포함) |
 | `ECOWARDEN_FACE_MASK_MIN_PX` | `24` | 이보다 작은 얼굴은 무시 |
+| `ECOWARDEN_FACE_MASK_DETECT_WIDTH` | `640` | 검출용 축소 폭(px). 0이면 원본 해상도에서 검출(느림) |
+| `ECOWARDEN_FACE_MASK_LABEL` | `1` | 마스킹 자리에 번호(F1, F2…) 새김 |
+| `ECOWARDEN_FACE_MASK_LABEL_PREFIX` | `F` | 번호 접두사 |
+| `ECOWARDEN_FACE_MASK_LABEL_SCALE` | `0.8` | 번호 글자 크기 |
 
 #### 프라이버시 3계층 — 원본 암호화 보관 (v56, §3.9)
 
@@ -332,18 +345,60 @@ sudo env ECOWARDEN_RESTRICTED_ZONES=3,4 ./build/rplidar_app
 
 ### 3.9 프라이버시 3계층 — 얼굴 마스킹 · 원본 암호화 (v56)
 
-증거 사진이 기기 밖으로 나가는 모든 경로(`CaptureBase64` / `CaptureToFile` / `CaptureToFilePath`)에 동일하게 적용된다.
+증거 이미지가 기기 밖으로 나가거나 디스크에 남는 **모든 경로**에 동일하게 적용된다 — 사진뿐 아니라 **블랙박스 영상도 포함**이다.
 
 | 계층 | 내용 | 구현 | 기본값 |
 |------|------|------|--------|
 | **1계층 평상시** | 카메라 미작동, 비식별 LiDAR 좌표만 | 구조적 보장 | 항상 |
-| **2계층 공개본** | 증거 사진 **얼굴 자동 마스킹** 후 저장·전송 | `include/face_masking.h` | **ON** |
+| **2계층 공개본** | 증거 사진·영상 **얼굴 자동 마스킹 + 번호 새김** 후 저장·전송 | `include/face_masking.h` | **ON** |
 | **3계층 원본** | 마스킹 전 원본 **AES-256-GCM 암호화** + 보존기한 자동 파기 + 열람 로그 | `include/evidence_vault.h` | OFF (키 설정 후 켬) |
+
+**적용 범위**
+
+| 경로 | 함수 | 마스킹 |
+|------|------|--------|
+| 서버 전송용 base64 | `CaptureBase64()` | 적용 |
+| 일반 스냅샷 | `CaptureToFile()` | 적용 |
+| 증거 사진 (오버레이) | `CaptureToFilePath()` | 적용 + 사이드카 JSON |
+| **블랙박스 영상** | `BlackboxSaveWorker()` | **적용** (프레임마다) |
+| 로컬 디버그 프리뷰 | `ShowPreviewFrame()` | 미적용 — 화면 표시 전용, 저장·전송하지 않음 |
 
 **처리 순서** — `CameraModule::PrepareEvidenceFrame()`:
 1. 원본 JPEG를 vault에 암호화 저장 (마스킹 전 상태여야 3계층의 의미가 있음)
 2. 얼굴 검출 → 블러/모자이크/박스 처리
 3. 그 다음에 배너·머리 위 ID 라벨을 그린다 (반대로 하면 라벨까지 블러됨)
+
+블랙박스 영상은 `BlackboxSaveWorker()` 가 **파일로 쓰기 직전** 프레임마다 마스킹한다. 링버퍼는 10Hz 상시 인코딩이라 거기서 검출까지 돌리면 캡처 스레드 부담이 크기 때문이다. 원본 프레임은 메모리에만 존재하고 디스크에 남지 않는다. 검출기는 스레드 안전하지 않아 사진 경로와 **별도 인스턴스**를 쓴다.
+
+#### 마스킹 번호 (F1, F2 …)
+
+얼굴을 가리면 사진만으로 누가 누구인지 구별할 수 없다. 관리자가 "1번이 버렸다"고 지목할 수 있어야 증거로 의미가 있으므로, **마스킹한 자리에 번호를 새긴다.**
+
+- 번호는 화면 **왼쪽부터** 매긴다 — 같은 장면이면 프레임이 바뀌어도 번호가 대체로 유지된다
+- 마스킹 영역에 테두리를 그려 **어디를 가렸는지** 보이게 한다
+- `ECOWARDEN_FACE_MASK_LABEL=0` 으로 끄거나 `_LABEL_PREFIX` 로 접두사를 바꿀 수 있다
+
+#### 사이드카 메타 — `<이미지경로>.masks.json`
+
+번호가 화면 어디에 해당하는지 서버·대시보드가 기계적으로 다루려면 좌표가 필요하다. 증거 사진 자체는 건드리지 않고 같은 이름의 JSON을 나란히 남긴다.
+
+```json
+{
+  "image": "20260731_153000_zone_3.jpg",
+  "backend": "haar",
+  "used_fallback": false,
+  "face_count": 2,
+  "label_prefix": "F",
+  "faces": [
+    {"label": "F1", "index": 1, "x": 412, "y": 180, "w": 160, "h": 190},
+    {"label": "F2", "index": 2, "x": 980, "y": 205, "w": 145, "h": 172}
+  ]
+}
+```
+
+#### 검출 성능
+
+1080p를 그대로 Haar에 넣으면 프레임당 수십~수백 ms라 블랙박스 200프레임 처리가 현실적이지 않다. 그래서 **축소본에서 검출하고 박스를 원본 좌표로 되돌린다** — 마스킹 자체는 항상 원본 해상도에 적용된다. 기본 검출 폭 640px, `ECOWARDEN_FACE_MASK_DETECT_WIDTH` 로 조정한다.
 
 **fail-closed 설계**: 마스킹이 켜져 있는데 검출기를 로드하지 못하면 원본을 그대로 내보내지 않는다. `ECOWARDEN_FACE_MASK_FALLBACK=1`(기본)이면 화면 상단을 통째로 마스킹하고, `0`이면 **사진 저장 자체를 건너뛴다**. "마스킹한다고 말해 놓고 실제로는 원본이 나가는" 상황을 구조적으로 막는다.
 

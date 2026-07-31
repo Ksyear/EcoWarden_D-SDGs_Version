@@ -305,6 +305,14 @@ inline FaceMaskParams DefaultFaceMaskParams() {
                static_cast<uint32_t>(fm.min_face_px)));
     fm.expand_ratio  = EnvDouble("ECOWARDEN_FACE_MASK_EXPAND",
                                  fm.expand_ratio);
+    fm.detect_max_width = static_cast<int>(
+        EnvU32("ECOWARDEN_FACE_MASK_DETECT_WIDTH",
+               static_cast<uint32_t>(fm.detect_max_width)));
+    fm.label_faces  = EnvBool("ECOWARDEN_FACE_MASK_LABEL", fm.label_faces);
+    fm.label_prefix = EnvString("ECOWARDEN_FACE_MASK_LABEL_PREFIX",
+                                fm.label_prefix);
+    fm.label_scale  = EnvDouble("ECOWARDEN_FACE_MASK_LABEL_SCALE",
+                                fm.label_scale);
     fm.blur_strength = EnvDouble("ECOWARDEN_FACE_MASK_STRENGTH",
                                  fm.blur_strength);
     fm.pixelate_blocks = static_cast<int>(

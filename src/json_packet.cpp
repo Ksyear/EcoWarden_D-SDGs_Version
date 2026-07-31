@@ -179,6 +179,21 @@ std::string JsonPacketSender::Serialize(
         j_tr["is_dumped_item"] = tr.is_dumped_item;
         j_tr["is_dump_suspect"] = tr.is_dump_suspect;
         j_tr["is_object_candidate"] = tr.is_object_candidate;
+
+        // 칼만 속도 (v56) — Unity 의 걷기/뛰기 블렌딩용.
+        //   KF 내부 상태는 **mm/frame** 이다(dt 가 frame 단위). Unity 가
+        //   쓰기 좋게 **mm/s** 로 변환해 보낸다 (공칭 10Hz 기준 ×10).
+        //   프레임률이 흔들리면 그만큼 근사값이므로, 정밀 물리 계산이 아니라
+        //   애니메이션 블렌딩 용도로만 쓸 것.
+        //   KF 가 아직 초기화되지 않은 트랙은 필드를 넣지 않는다.
+        if (tr.kf.IsInitialized()) {
+            constexpr double kFramesPerSec = 10.0;
+            const double vx = tr.kf.GetVX() * kFramesPerSec;
+            const double vy = tr.kf.GetVY() * kFramesPerSec;
+            j_tr["vx"] = std::round(vx * 10.0) / 10.0;
+            j_tr["vy"] = std::round(vy * 10.0) / 10.0;
+            j_tr["speed"] = std::round(std::hypot(vx, vy) * 10.0) / 10.0;
+        }
         if (tr.person_group_id) {
             j_tr["person_group_id"] = tr.person_group_id;
             j_tr["group_width"] = std::round(tr.person_group_width_mm * 10.0) / 10.0;
@@ -208,6 +223,11 @@ std::string JsonPacketSender::Serialize(
         j_evt["object_x"] = std::round(evt.object_x_mm * 10.0) / 10.0;
         j_evt["object_y"] = std::round(evt.object_y_mm * 10.0) / 10.0;
         j_evt["timestamp"] = evt.timestamp_ms;
+        // 증거 사진 상대 경로 (v56). 비어 있으면 필드를 넣지 않아
+        // 기존 수신기 동작을 바꾸지 않는다.
+        if (!evt.image_file.empty()) {
+            j_evt["image_file"] = evt.image_file;
+        }
         j_events.push_back(std::move(j_evt));
     }
     for (const auto& evt : dep_events) {
@@ -317,7 +337,23 @@ bool JsonPacketSender::Send(const std::vector<Cluster>& clusters,
         pending_intrusions_.push_back({evt, kIntrusionResendFrames - 1});
     }
 
-    std::string payload = Serialize(clusters, tracks, dep_with_pending, dump_events, frame_id, tracked_only, intr_with_pending);
+    // dumping 재전송 (v56): 이 이벤트가 유실되면 Unity 의 투기 애니메이션과
+    //   증거 사진 표시가 통째로 사라진다 — 수신 측에서 복구 불가.
+    //   departure/intrusion 과 동일한 정책으로 손실을 흡수한다.
+    std::vector<DumpingEvent> dump_with_pending = dump_events;
+    for (auto& pdmp : pending_dumps_) {
+        dump_with_pending.push_back(pdmp.evt);
+        pdmp.remaining--;
+    }
+    pending_dumps_.erase(
+        std::remove_if(pending_dumps_.begin(), pending_dumps_.end(),
+                       [](const PendingDump& pd) { return pd.remaining <= 0; }),
+        pending_dumps_.end());
+    for (const auto& evt : dump_events) {
+        pending_dumps_.push_back({evt, kDumpingResendFrames - 1});
+    }
+
+    std::string payload = Serialize(clusters, tracks, dep_with_pending, dump_with_pending, frame_id, tracked_only, intr_with_pending);
     if (payload.size() <= UDP_MAX_DGRAM) {
         if (udp_.SendBuffer(payload.data(), payload.size())) {
             sent_count_++;

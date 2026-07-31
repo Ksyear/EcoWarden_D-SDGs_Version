@@ -4,6 +4,7 @@
 #include <sys/types.h>
 
 #include <filesystem>
+#include <fstream>
 
 #ifdef USE_OPENCV
 #include <chrono>
@@ -126,7 +127,8 @@ void CameraModule::SetEvidenceVault(EvidenceVault* vault) {
 //     3) 호출부가 배너·ID 라벨을 그린다 — 마스킹 후여야 라벨이 안 뭉갠다.
 //
 bool CameraModule::PrepareEvidenceFrame(void* frame_mat,
-                                        const std::string& vault_name) {
+                                        const std::string& vault_name,
+                                        FaceMaskResult* out_mask) {
 #ifdef USE_OPENCV
     if (frame_mat == nullptr) return false;
     cv::Mat& frame = *static_cast<cv::Mat*>(frame_mat);
@@ -151,6 +153,7 @@ bool CameraModule::PrepareEvidenceFrame(void* frame_mat,
         face_masker_ = std::make_unique<FaceMasker>(face_mask_params_);
     }
     const FaceMaskResult mr = face_masker_->Apply(&frame);
+    if (out_mask) *out_mask = mr;
     if (!mr.safe_to_emit) {
         std::cerr << "[FACEMASK] fail-closed — 마스킹 불가로 증거 사진 저장을 "
                      "건너뜁니다 (ECOWARDEN_FACE_MASK_FALLBACK=1 로 폴백 허용 "
@@ -160,14 +163,57 @@ bool CameraModule::PrepareEvidenceFrame(void* frame_mat,
     if (mr.applied) {
         std::cout << "[FACEMASK] " << mr.backend << " — 얼굴 " << mr.faces
                   << "개 마스킹"
-                  << (mr.used_fallback ? " (상단 영역 폴백)" : "") << "\n";
+                  << (mr.used_fallback ? " (상단 영역 폴백)" : "");
+        for (const auto& b : mr.boxes) {
+            std::cout << " [" << face_mask_params_.label_prefix << b.index
+                      << " " << b.x << "," << b.y << " " << b.w << "x" << b.h
+                      << "]";
+        }
+        std::cout << "\n";
     }
     return true;
 #else
     (void)frame_mat;
     (void)vault_name;
+    (void)out_mask;
     return false;
 #endif
+}
+
+// ── 마스킹 메타 사이드카 기록 ────────────────────────────────────────
+//
+//   사진에는 번호(F1, F2 …)가 눈에 보이게 새겨지지만, 그 번호가 화면
+//   어디에 해당하는지는 사람이 눈으로 봐야 안다. 관리자 화면이나 서버가
+//   기계적으로 다루려면 좌표가 필요하므로 같은 이름의 `.masks.json` 을
+//   나란히 남긴다. 증거 사진 자체는 건드리지 않는다.
+//
+void CameraModule::WriteMaskSidecar(const std::string& image_path,
+                                    const FaceMaskResult& mask) {
+    if (!face_mask_params_.enable) return;
+    if (image_path.empty()) return;
+
+    const std::string side = image_path + ".masks.json";
+    std::ofstream f(side);
+    if (!f) return;
+
+    f << "{\n";
+    f << "  \"image\": \"" << std::filesystem::path(image_path).filename().string()
+      << "\",\n";
+    f << "  \"backend\": \"" << (mask.backend ? mask.backend : "none") << "\",\n";
+    f << "  \"used_fallback\": " << (mask.used_fallback ? "true" : "false") << ",\n";
+    f << "  \"face_count\": " << mask.faces << ",\n";
+    f << "  \"label_prefix\": \"" << face_mask_params_.label_prefix << "\",\n";
+    f << "  \"faces\": [";
+    for (size_t i = 0; i < mask.boxes.size(); ++i) {
+        const auto& b = mask.boxes[i];
+        if (i) f << ",";
+        f << "\n    {\"label\": \"" << face_mask_params_.label_prefix << b.index
+          << "\", \"index\": " << b.index
+          << ", \"x\": " << b.x << ", \"y\": " << b.y
+          << ", \"w\": " << b.w << ", \"h\": " << b.h << "}";
+    }
+    f << (mask.boxes.empty() ? "" : "\n  ") << "]\n";
+    f << "}\n";
 }
 
 bool CameraModule::Start() {
@@ -330,6 +376,30 @@ void CameraModule::BlackboxSaveWorker(std::string path, int64_t event_ms,
         return;
     }
 
+    // ── 얼굴 마스킹 (프라이버시 2계층) ───────────────────────────────
+    //
+    //   링버퍼에는 원본 프레임이 들어 있다 (10Hz 로 상시 인코딩하는데
+    //   거기서 얼굴 검출까지 돌리면 스캔 루프에 부담이 크기 때문).
+    //   그래서 **디스크에 쓰기 직전인 여기서** 프레임마다 마스킹한다.
+    //   원본 JPEG 는 메모리에만 존재하고 파일로 남지 않는다.
+    //
+    //   검출기는 스레드 안전하지 않으므로 이 worker 전용 인스턴스를 쓴다
+    //   (사진 경로의 face_masker_ 와 동시 호출될 수 있음).
+    if (!blackbox_masker_) {
+        blackbox_masker_ = std::make_unique<FaceMasker>(face_mask_params_);
+    }
+    {
+        // fail-closed: 마스킹이 요구됐는데 불가능하면 영상을 저장하지 않는다.
+        cv::Mat probe = first.clone();
+        const FaceMaskResult pr = blackbox_masker_->Apply(&probe);
+        if (!pr.safe_to_emit) {
+            std::cerr << "[FACEMASK] fail-closed — 마스킹 불가로 블랙박스 영상 "
+                         "저장을 건너뜁니다 (" << path << ")\n";
+            blackbox_saving_ = false;
+            return;
+        }
+    }
+
     cv::VideoWriter writer(path,
                            cv::VideoWriter::fourcc('M', 'J', 'P', 'G'),
                            blackbox_.fps, first.size());
@@ -340,10 +410,17 @@ void CameraModule::BlackboxSaveWorker(std::string path, int64_t event_ms,
     }
 
     size_t written = 0;
+    size_t masked_frames = 0;
+    int    masked_faces  = 0;
     for (const auto& f : frames) {
         cv::Mat img = cv::imdecode(f.jpeg, cv::IMREAD_COLOR);
         if (img.empty()) continue;
         if (img.size() != first.size()) cv::resize(img, img, first.size());
+
+        const FaceMaskResult mr = blackbox_masker_->Apply(&img);
+        if (!mr.safe_to_emit) continue;   // 이 프레임은 버린다
+        if (mr.applied) { masked_frames++; masked_faces += mr.faces; }
+
         writer.write(img);
         written++;
     }
@@ -352,6 +429,12 @@ void CameraModule::BlackboxSaveWorker(std::string path, int64_t event_ms,
     std::cout << "[CAMERA] Blackbox clip saved: " << path
               << " (" << written << " frames, "
               << (end_ms - begin_ms) / 1000 << "s window)\n";
+    if (face_mask_params_.enable) {
+        std::cout << "[FACEMASK] 블랙박스 마스킹 — " << masked_frames << "/"
+                  << written << " 프레임에서 얼굴 " << masked_faces
+                  << "개 처리 (backend=" << blackbox_masker_->BackendName()
+                  << ")\n";
+    }
 
     // 저장 완료 통지 — 서버 업로드 등 후처리는 콜백 쪽 큐에서 비동기 수행.
     if (written > 0 && blackbox_saved_cb_) {
@@ -459,8 +542,10 @@ std::string CameraModule::CaptureToFilePath(const std::string& path,
 
     // ★ 원본 vault 보관 + 얼굴 마스킹은 배너를 그리기 전에 끝낸다.
     //   (마스킹을 나중에 하면 ID 라벨까지 블러 처리된다)
+    FaceMaskResult mask_info;
     if (!PrepareEvidenceFrame(&frame,
-                              std::filesystem::path(path).stem().string())) {
+                              std::filesystem::path(path).stem().string(),
+                              &mask_info)) {
         return "";
     }
 
@@ -525,6 +610,7 @@ std::string CameraModule::CaptureToFilePath(const std::string& path,
     std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
     if (cv::imwrite(path, frame, params)) {
         std::cout << "[CAMERA] Snapshot saved: " << path << "\n";
+        WriteMaskSidecar(path, mask_info);
         return path;
     }
 #else
