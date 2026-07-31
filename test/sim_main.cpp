@@ -1538,11 +1538,30 @@ static bool RunFaceMaskUnitTest() {
         const auto r = m.Apply(nullptr);
         expect(!m.Available(), "OpenCV 없으면 Available=false");
         expect(!r.safe_to_emit,
-               "★★ 마스킹 요구 + 검출기 없음 → safe_to_emit=false "
+               "마스킹 요구 + 검출기 없음 → safe_to_emit=false "
                "(원본이 절대 나가면 안 됨)");
 #else
-        // OpenCV 가 있으면 검출기 로드 여부에 따라 갈리므로 계약만 확인
-        expect(true, "OpenCV 빌드 — 실제 검출은 Pi 실촬영에서 검증");
+        // ── 실기기(Pi) 진단 ──────────────────────────────────────────
+        //   여기서 검출기가 안 잡히면 실제 운영에서 얼굴이 안 가려지고
+        //   폴백(상단 통째 마스킹)으로 떨어진다. 시연 전에 알아야 한다.
+        std::printf("  face_masking: 검출기 로드 %s (backend=%s)\n",
+                    m.Available() ? "성공" : "실패", m.BackendName());
+        if (!m.Available()) {
+            std::printf(
+                "  face_masking: 경고 — cascade 파일을 찾지 못했습니다.\n"
+                "                얼굴 마스킹이 폴백(상단 영역 통째 마스킹)으로\n"
+                "                동작합니다. setup.sh 를 다시 실행하거나\n"
+                "                ECOWARDEN_FACE_MASK_CASCADE 로 경로를 지정하세요.\n");
+        }
+        // 잘못된 경로를 주면 반드시 로드에 실패해야 한다 (조용한 통과 금지)
+        {
+            ecowarden::FaceMaskParams bad;
+            bad.enable = true;
+            bad.cascade_path = "/nonexistent/ecowarden-cascade.xml";
+            ecowarden::FaceMasker mb(bad);
+            expect(!mb.Available(),
+                   "존재하지 않는 cascade 경로 → Available=false");
+        }
 #endif
     }
 

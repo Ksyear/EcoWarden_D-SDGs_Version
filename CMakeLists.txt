@@ -115,6 +115,26 @@ set(PRIVACY_SOURCES
   src/evidence_vault.cpp
 )
 
+# ── 선택 의존성 일괄 적용 헬퍼 ──────────────────────────────────────
+#
+#   USE_OPENCV / USE_OPENSSL 는 add_definitions() 로 **전역** 정의되는데
+#   include 경로와 라이브러리는 타깃별로 붙여야 한다. 이 비대칭 때문에
+#   "정의는 켜졌는데 헤더 경로가 없어서" 컴파일이 깨지는 사고가 있었다
+#   (v56: rplidar_sim 에 OpenCV 경로 누락 → object_classifier.cpp 빌드 실패.
+#    OpenCV 가 없는 개발 머신에서는 스텁 경로로 빠져 재현되지 않았다).
+#
+#   아래 함수로 일원화해, 카메라·프라이버시 소스를 쓰는 타깃은 반드시
+#   같은 방식으로 의존성을 받도록 한다.
+function(ecowarden_apply_optional_deps tgt)
+  if(OpenCV_FOUND)
+    target_include_directories(${tgt} PRIVATE ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(${tgt} PRIVATE ${OpenCV_LIBS})
+  endif()
+  if(OpenSSL_FOUND OR OPENSSL_FOUND)
+    target_link_libraries(${tgt} PRIVATE OpenSSL::Crypto)
+  endif()
+endfunction()
+
 set(APP_SOURCES
   src/rplidar_s2.cpp
   src/scan_processor.cpp
@@ -135,14 +155,7 @@ add_executable(rplidar_app ${APP_SOURCES})
 target_include_directories(rplidar_app PRIVATE ${CMAKE_SOURCE_DIR}/include ${RPLIDAR_SDK_INCLUDE_DIRS} ${CURL_INCLUDE_DIRS})
 target_link_libraries(rplidar_app PRIVATE rplidar_sdk CURL::libcurl nlohmann_json::nlohmann_json Threads::Threads)
 
-if(OpenCV_FOUND)
-  target_include_directories(rplidar_app PRIVATE ${OpenCV_INCLUDE_DIRS})
-  target_link_libraries(rplidar_app PRIVATE ${OpenCV_LIBS})
-endif()
-
-if(OpenSSL_FOUND OR OPENSSL_FOUND)
-  target_link_libraries(rplidar_app PRIVATE OpenSSL::Crypto)
-endif()
+ecowarden_apply_optional_deps(rplidar_app)
 
 if(USE_GPIOD)
   target_link_libraries(rplidar_app PRIVATE ${GPIOD_LIB})
@@ -162,13 +175,7 @@ target_link_libraries(check_lidar PRIVATE rplidar_sdk Threads::Threads)
 add_executable(check_camera test/test_camera.cpp src/camera_module.cpp ${PRIVACY_SOURCES})
 target_include_directories(check_camera PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(check_camera PRIVATE Threads::Threads)
-if(OpenCV_FOUND)
-  target_include_directories(check_camera PRIVATE ${OpenCV_INCLUDE_DIRS})
-  target_link_libraries(check_camera PRIVATE ${OpenCV_LIBS})
-endif()
-if(OpenSSL_FOUND OR OPENSSL_FOUND)
-  target_link_libraries(check_camera PRIVATE OpenSSL::Crypto)
-endif()
+ecowarden_apply_optional_deps(check_camera)
 
 add_executable(servo_sweep_test
   test/servo_sweep_test.cpp
@@ -178,13 +185,7 @@ add_executable(servo_sweep_test
 )
 target_include_directories(servo_sweep_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(servo_sweep_test PRIVATE Threads::Threads)
-if(OpenCV_FOUND)
-  target_include_directories(servo_sweep_test PRIVATE ${OpenCV_INCLUDE_DIRS})
-  target_link_libraries(servo_sweep_test PRIVATE ${OpenCV_LIBS})
-endif()
-if(OpenSSL_FOUND OR OPENSSL_FOUND)
-  target_link_libraries(servo_sweep_test PRIVATE OpenSSL::Crypto)
-endif()
+ecowarden_apply_optional_deps(servo_sweep_test)
 
 # 카메라/LiDAR 의존 0 — sysfs PWM만 직접 두드리는 최소 서보 테스트
 add_executable(servo_only_test test/servo_only_test.cpp)
@@ -201,6 +202,7 @@ add_executable(rplidar_sim
   src/face_masking.cpp
 )
 target_include_directories(rplidar_sim PRIVATE ${CMAKE_SOURCE_DIR}/include)
-if(OpenSSL_FOUND OR OPENSSL_FOUND)
-  target_link_libraries(rplidar_sim PRIVATE OpenSSL::Crypto)
-endif()
+target_link_libraries(rplidar_sim PRIVATE Threads::Threads)
+# object_classifier.cpp / face_masking.cpp 가 USE_OPENCV 분기를 타므로
+# OpenCV 가 있는 환경(Pi)에서는 include 경로가 반드시 필요하다.
+ecowarden_apply_optional_deps(rplidar_sim)
