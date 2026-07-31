@@ -58,13 +58,8 @@ EventNotifier::EventNotifier(const NotifierConfig& cfg) : cfg_(cfg) {
     }
     if (cfg_.api_key.empty()) {
         std::fprintf(stderr,
-            "[NOTIFIER] 서버 전송 비활성 (ECOWARDEN_API_KEY 미설정)\n"
-            "[NOTIFIER]   → Unity(UDP) 전송은 **정상 동작**합니다. "
-            "감지·촬영·영상 저장도 모두 그대로입니다.\n"
-            "[NOTIFIER]   → HTTP 이벤트는 큐에 쌓지 않고 폐기합니다 "
-            "(보낼 서버가 없으므로).\n"
-            "[NOTIFIER]   백엔드를 붙일 때: /etc/ecowarden/secrets.conf 에 "
-            "ECOWARDEN_API_KEY=<키>\n");
+            "[NOTIFIER] 서버 미사용 모드 — Unity(UDP) 전송만 사용합니다.\n"
+            "[NOTIFIER]   감지·촬영·마스킹·영상 저장 모두 정상 동작합니다.\n");
     }
 
     // 큐 파일 경로 환경변수 오버라이드 (/tmp 는 모든 사용자가 읽을 수 있음 —
@@ -407,9 +402,13 @@ void EventNotifier::UploadClip(const std::string& path,
     // 키가 없으면 보낼 서버가 없다. 수십 MB 를 3회 재시도해 봐야 시간과
     // 대역폭만 쓰므로 시도조차 하지 않는다 (파일은 기기에 그대로 남는다).
     if (cfg_.api_key.empty()) {
-        std::fprintf(stderr,
-            "[NOTIFIER] clip 업로드 생략 (서버 미설정) — 기기 보관만: %s\n",
-            path.c_str());
+        // 서버 미사용 모드에서는 투기마다 찍히면 시끄럽다 — 1회만 알린다.
+        static std::once_flag once;
+        std::call_once(once, []() {
+            std::fprintf(stderr,
+                "[NOTIFIER] 서버 미사용 모드 — 블랙박스 클립은 기기에만 "
+                "보관합니다\n");
+        });
         return;
     }
 
@@ -593,11 +592,10 @@ void EventNotifier::SendLoop() {
 //   "이런 상태로 돌고 있다" 는 안내로 취급한다. 50건마다 한 번만 찍는다.
 void EventNotifier::MaybeWarnNoServer() {
     const size_t n = dropped_count_.load();
-    if (n == 1 || n % 50 == 0) {
+    if (n == 1 || n % 200 == 0) {
         std::fprintf(stderr,
-            "[NOTIFIER] 서버 전송 비활성 — 이벤트 %zu건 폐기 (큐에 쌓지 않음)\n"
-            "[NOTIFIER]   Unity(UDP) 전송은 정상 동작합니다. "
-            "서버로도 보내려면 ECOWARDEN_API_KEY 를 설정하세요.\n", n);
+            "[NOTIFIER] 서버 미사용 모드 — HTTP 이벤트 %zu건 폐기 "
+            "(Unity 전송은 정상)\n", n);
     }
 }
 
@@ -639,6 +637,28 @@ void EventNotifier::WriteQueueFile(const std::vector<std::string>& lines) {
 
 // ── FlushQueue: 파일 + 메모리 큐 일괄 재전송 ───────────────────────
 size_t EventNotifier::FlushQueue() {
+    // 서버가 설정돼 있지 않으면 재시도할 대상이 없다.
+    //   이전 실행에서 쌓인 큐 파일을 계속 읽어 재시도하면, 매 주기마다
+    //   실패 로그만 반복되고 큐는 영원히 줄지 않는다. 한 번 비우고 끝낸다.
+    if (cfg_.api_key.empty() || cfg_.dry_run) {
+        std::vector<std::string> stale = ReadQueueFile();
+        {
+            std::lock_guard<std::mutex> lock(fail_queue_mutex_);
+            while (!pending_queue_.empty()) {
+                stale.push_back(pending_queue_.front());
+                pending_queue_.pop();
+            }
+        }
+        if (!stale.empty()) {
+            dropped_count_ += stale.size();
+            WriteQueueFile({});   // 큐 파일 비우기
+            std::fprintf(stderr,
+                "[NOTIFIER] 서버 미설정 — 대기 중이던 이벤트 %zu건을 정리했습니다"
+                " (Unity 전송은 계속 정상)\n", stale.size());
+        }
+        return 0;
+    }
+
     std::vector<std::string> file_lines = ReadQueueFile();
 
     {
@@ -679,22 +699,8 @@ size_t EventNotifier::FlushQueue() {
     WriteQueueFile(still_failed);
 
     if (!still_failed.empty()) {
-        // 왜 안 나가는지를 같이 알린다. v56 부터 키가 없으면 전송을 아예
-        // 시도하지 않는데(fail-closed), 그 경고는 시작 시 1회뿐이라
-        // 운영 중에는 "큐만 늘어나고 이유는 모르는" 상태가 된다.
-        if (cfg_.api_key.empty()) {
-            std::fprintf(stderr,
-                "[NOTIFIER] ★ 원인: ECOWARDEN_API_KEY 미설정 — 전송을 시도조차 "
-                "하지 않습니다.\n"
-                "[NOTIFIER]   키를 넣고 재시작하면 큐에 쌓인 이벤트가 함께 "
-                "전송됩니다 (유실 없음).\n"
-                "[NOTIFIER]   echo 'ECOWARDEN_API_KEY=<키>' | "
-                "sudo tee -a /etc/ecowarden/secrets.conf\n");
-        } else if (cfg_.dry_run) {
-            std::fprintf(stderr,
-                "[NOTIFIER] ★ 원인: DRY-RUN 모드입니다 "
-                "(ECOWARDEN_DRY_RUN=0 으로 꺼야 전송됩니다).\n");
-        }
+        // 여기까지 왔다는 건 서버가 설정돼 있는데 실패한 것이다
+        // (미설정 케이스는 함수 앞에서 걸러진다).
         std::fprintf(stderr, "[NOTIFIER] %zu events still queued after flush\n",
                      still_failed.size());
     }
