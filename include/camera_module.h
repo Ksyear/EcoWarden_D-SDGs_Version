@@ -133,7 +133,12 @@ private:
      *
      *   반드시 배너·ID 라벨을 그리기 **전에** 호출해야 라벨이 블러되지 않는다.
      */
-    bool PrepareEvidenceFrame(void* frame_mat, const std::string& vault_name);
+    bool PrepareEvidenceFrame(void* frame_mat, const std::string& vault_name,
+                              FaceMaskResult* out_mask = nullptr);
+
+    // 마스킹 번호·좌표를 `<image_path>.masks.json` 으로 남긴다.
+    void WriteMaskSidecar(const std::string& image_path,
+                          const FaceMaskResult& mask);
 
     int device_id_;
     std::string capture_dir_;
@@ -158,7 +163,9 @@ private:
 
     // ── 프라이버시 2·3계층 ──────────────────────────────────────────
     FaceMaskParams face_mask_params_;
-    std::unique_ptr<FaceMasker> face_masker_;   // Start() 시 생성
+    std::unique_ptr<FaceMasker> face_masker_;   // 사진 경로 (메인 루프 스레드)
+    // 블랙박스 저장 worker 전용 — 검출기가 스레드 안전하지 않아 분리한다.
+    std::unique_ptr<FaceMasker> blackbox_masker_;
     EvidenceVault* evidence_vault_ = nullptr;   // 소유하지 않음
 
     BlackboxSavedCallback blackbox_saved_cb_;

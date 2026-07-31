@@ -310,8 +310,20 @@ bool EventNotifier::HttpPost(const std::string& url, const std::string& json_bod
         long http_code = 0;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
         success = (http_code >= 200 && http_code < 300);
-        if (!success && fail_count_ % 10 == 0) {
-            std::fprintf(stderr, "[NOTIFIER] HTTP %ld (Server Down?)\n", http_code);
+        if (!success) {
+            // 404 는 재시도해도 안 고쳐진다 — 서버에 그 경로가 없는 것이다.
+            // 매번 조용히 실패하면 원인 파악이 늦어지므로 명시적으로 알린다.
+            if (http_code == 404 && fail_count_ % 10 == 0) {
+                std::fprintf(stderr,
+                    "[NOTIFIER] HTTP 404 — endpoint 미구현: %s\n"
+                    "[NOTIFIER]   재시도로 해결되지 않습니다. 백엔드에 해당 "
+                    "경로를 추가하거나 전송을 끄세요\n"
+                    "[NOTIFIER]   (intrusion: ECOWARDEN_INTRUSION_NOTIFY=0, "
+                    "clip: ECOWARDEN_CLIP_UPLOAD=0)\n", url.c_str());
+            } else if (fail_count_ % 10 == 0) {
+                std::fprintf(stderr, "[NOTIFIER] HTTP %ld (Server Down?)\n",
+                             http_code);
+            }
         }
     } else {
         if (fail_count_ % 50 == 0) {

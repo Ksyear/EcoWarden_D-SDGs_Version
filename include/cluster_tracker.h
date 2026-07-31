@@ -82,6 +82,12 @@ struct DumpingEvent {
     double   object_x_mm;      // 투기물 위치 X
     double   object_y_mm;      // 투기물 위치 Y
     uint64_t timestamp_ms;     // 확정 시각 (epoch ms)
+
+    // 증거 사진의 captures/ 기준 상대 경로 (v56).
+    //   예: "dumps/evt_123/confirm.jpg"
+    //   트래커는 이 값을 채우지 않는다 — main 이 촬영 후 채워 넣는다.
+    //   Unity 는 이 경로로 정확한 사진을 집는다 (없으면 "최신 사진" 폴백).
+    std::string image_file;
 };
 
 // ── 투기 의심 이벤트 (즉각 캡처용) ───────────────────────────────────

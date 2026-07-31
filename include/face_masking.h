@@ -39,6 +39,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace ecowarden {
 
@@ -71,8 +72,23 @@ struct FaceMaskParams {
     int    min_neighbors = 5;
     int    min_face_px   = 24;   // 이보다 작은 얼굴은 무시 (노이즈)
 
+    // 검출을 수행할 최대 가로 폭(px). 원본이 이보다 크면 축소본에서
+    // 검출하고 박스를 원본 좌표로 되돌린다. 마스킹 자체는 항상 원본에
+    // 적용된다. 1080p 를 그대로 Haar 에 넣으면 프레임당 수십~수백 ms 라
+    // 블랙박스 200프레임 처리가 현실적이지 않다. 0 이면 축소 안 함.
+    int    detect_max_width = 640;
+
     // 검출 박스를 얼마나 넓혀 마스킹할지 — 머리카락·턱선까지 덮기 위함
     double expand_ratio = 0.25;
+
+    // ── 마스킹 번호 ──────────────────────────────────────────────────
+    //   얼굴을 가리면 사진만 보고 누가 누구인지 구분할 수 없다.
+    //   그래서 마스킹한 자리에 번호를 새겨, 관리자가 "1번 사람" 식으로
+    //   지목할 수 있게 한다. 번호는 화면 **왼쪽부터** 매기므로 같은
+    //   장면에서는 프레임이 달라도 대체로 같은 번호가 유지된다.
+    bool        label_faces  = true;
+    std::string label_prefix = "F";   // 예: F1, F2
+    double      label_scale  = 0.8;
 
     // kBlur: ROI 짧은 변 대비 커널 비율 (0.35 ≈ 형체만 남는 수준)
     double blur_strength = 0.35;
@@ -88,6 +104,13 @@ struct FaceMaskParams {
     double fallback_upper_ratio = 0.45;
 };
 
+// ── 마스킹한 얼굴 1개 ────────────────────────────────────────────────
+//   OpenCV 타입을 헤더에 노출하지 않기 위해 좌표를 그대로 담는다.
+struct MaskedFace {
+    int index = 0;   // 화면 왼쪽부터 1, 2, 3 … (프레임 간 안정적)
+    int x = 0, y = 0, w = 0, h = 0;   // 마스킹한 영역 (px)
+};
+
 // ── 마스킹 결과 ──────────────────────────────────────────────────────
 struct FaceMaskResult {
     bool        applied     = false;  // 실제로 마스킹이 적용됐는가
@@ -95,6 +118,7 @@ struct FaceMaskResult {
     bool        used_fallback = false;// 폴백(상단 통째) 경로였는가
     bool        safe_to_emit = false; // 이 프레임을 내보내도 되는가
     const char* backend     = "none"; // "dnn" | "haar" | "fallback" | "none"
+    std::vector<MaskedFace> boxes;    // 마스킹 위치와 번호 (로그·메타 기록용)
 };
 
 /**

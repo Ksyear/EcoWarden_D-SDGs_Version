@@ -134,6 +134,18 @@ private:
     };
     std::vector<PendingIntrusion> pending_intrusions_;
 
+    // dumping 은 이 시스템에서 **가장 중요한 단발 이벤트**인데 v56 이전에는
+    // 1회만 보냈다. UDP 패킷 하나가 유실되면 Unity 의 투기 애니메이션과
+    // 증거 사진 표시가 통째로 사라지고, 수신 측에서는 복구할 방법이 없다.
+    // departure/intrusion 과 같은 방식으로 N프레임 반복 전송한다.
+    // (Unity 는 같은 ID 에 무적 시간을 두어 중복을 흡수한다)
+    static constexpr int kDumpingResendFrames = 5;
+    struct PendingDump {
+        DumpingEvent evt;
+        int remaining;
+    };
+    std::vector<PendingDump> pending_dumps_;
+
     /**
      * @brief epoch ms → ISO 8601 문자열
      */

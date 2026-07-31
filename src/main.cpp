@@ -534,7 +534,12 @@ int main(int argc, char *argv[]) {
         }
 
         // (5) 이벤트 처리 (투기 확정 시 증거 사진 확보 및 전송)
-        for (const auto& evt : dump_events) {
+        //   촬영 후 `image_file`(captures/ 기준 상대 경로)을 채운 사본을
+        //   만들어 이후 경로(재검증/서버/Unity)에 일관되게 흘려보낸다 (v56).
+        std::vector<ecowarden::DumpingEvent> enriched_dumps;
+        enriched_dumps.reserve(dump_events.size());
+        for (const auto& evt_in : dump_events) {
+            ecowarden::DumpingEvent evt = evt_in;   // 가변 복사본
             const int dump_zone = ecowarden::SuspectToZone(
                 evt.object_x_mm, evt.object_y_mm, servo_params.mirror);
             const bool in_restricted = zone_policy.IsRestricted(dump_zone);
@@ -574,6 +579,19 @@ int main(int argc, char *argv[]) {
 
             std::string img_b64 = camera.CaptureBase64();
 
+            // Unity 가 정확한 증거 사진을 집을 수 있도록 상대 경로를 싣는다.
+            //   img_path 는 "captures/dumps/evt_1/confirm.jpg" 형태 →
+            //   앞의 "captures/" 를 떼어 "dumps/evt_1/confirm.jpg" 로 보낸다.
+            //   경로를 못 얻으면 필드를 비워 두고, Unity 는 기존처럼
+            //   "최신 사진" 으로 폴백한다.
+            if (!img_path.empty()) {
+                constexpr const char* kPrefix = "captures/";
+                evt.image_file = (img_path.rfind(kPrefix, 0) == 0)
+                    ? img_path.substr(std::strlen(kPrefix))
+                    : img_path;
+            }
+            enriched_dumps.push_back(evt);
+
             std::printf("  - Photo: %s (PIR: %s)\n", img_path.empty() ? "FAILED" : img_path.c_str(), motion ? "YES" : "NO");
 
             if (dump_validator.Enabled()) {
@@ -610,7 +628,7 @@ int main(int argc, char *argv[]) {
                 outgoing_dump_events.push_back(v.evt);
             }
         } else {
-            outgoing_dump_events = dump_events;
+            outgoing_dump_events = enriched_dumps;   // image_file 포함본
         }
 
         prof.Mark(ecowarden::PhaseProfiler::kEvents);

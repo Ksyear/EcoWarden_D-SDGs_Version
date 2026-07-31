@@ -114,6 +114,42 @@ cv::Rect ExpandRect(const cv::Rect& r, double ratio) {
     return cv::Rect(r.x - dx, r.y - dy, r.width + dx * 2, r.height + dy * 2);
 }
 
+// 마스킹한 자리에 번호를 새긴다.
+//
+//   얼굴을 가리면 사진만으로 사람을 구별할 수 없다. 관리자가 "1번이
+//   버렸다" 고 지목할 수 있어야 증거로서 의미가 있으므로, 마스킹 영역
+//   위에 번호를 그린다. 번호는 마스킹 **후에** 그려야 지워지지 않는다.
+void DrawFaceLabel(cv::Mat& frame, const cv::Rect& roi, int index,
+                   const FaceMaskParams& p) {
+    if (!p.label_faces) return;
+    const cv::Rect bounds(0, 0, frame.cols, frame.rows);
+    const cv::Rect box = roi & bounds;
+    if (box.width <= 1 || box.height <= 1) return;
+
+    const std::string text = p.label_prefix + std::to_string(index);
+    const double scale = std::max(0.4, p.label_scale);
+    constexpr int kThick = 2;
+    int baseline = 0;
+    const cv::Size sz =
+        cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, scale, kThick, &baseline);
+
+    // 마스킹 영역 중앙에 배치 (박스 밖으로 나가지 않게 클램프)
+    int tx = box.x + (box.width - sz.width) / 2;
+    int ty = box.y + (box.height + sz.height) / 2;
+    tx = std::max(0, std::min(tx, frame.cols - sz.width));
+    ty = std::max(sz.height, std::min(ty, frame.rows - baseline));
+
+    // 마스킹 영역 테두리 — 어디를 가렸는지 보이게 한다
+    cv::rectangle(frame, box, cv::Scalar(0, 200, 255), 2);
+    // 글자 가독성용 배경
+    cv::rectangle(frame,
+                  cv::Point(tx - 4, ty - sz.height - 4),
+                  cv::Point(tx + sz.width + 4, ty + baseline),
+                  cv::Scalar(0, 0, 0), cv::FILLED);
+    cv::putText(frame, text, cv::Point(tx, ty), cv::FONT_HERSHEY_SIMPLEX,
+                scale, cv::Scalar(0, 200, 255), kThick);
+}
+
 } // namespace
 
 struct FaceMasker::Impl {
@@ -231,14 +267,36 @@ FaceMaskResult FaceMasker::Apply(void* frame_mat) {
     if (impl_->cascade_ok) {
         cv::Mat gray;
         cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+
+        // 축소본에서 검출하고 박스만 원본 좌표로 되돌린다 (마스킹은 원본에).
+        double inv = 1.0;
+        if (params_.detect_max_width > 0 &&
+            gray.cols > params_.detect_max_width) {
+            const double f =
+                static_cast<double>(params_.detect_max_width) / gray.cols;
+            cv::resize(gray, gray, cv::Size(), f, f, cv::INTER_AREA);
+            inv = 1.0 / f;
+        }
         cv::equalizeHist(gray, gray);
+
+        // 최소 얼굴 크기도 같은 배율로 줄여야 기준이 유지된다.
+        const int min_px = std::max(
+            8, static_cast<int>(params_.min_face_px / inv));
         try {
             impl_->cascade.detectMultiScale(
                 gray, faces, params_.scale_factor, params_.min_neighbors, 0,
-                cv::Size(params_.min_face_px, params_.min_face_px));
+                cv::Size(min_px, min_px));
         } catch (const cv::Exception& e) {
             std::cerr << "[FACEMASK] Haar 검출 실패: " << e.what() << "\n";
             faces.clear();
+        }
+        if (inv != 1.0) {
+            for (cv::Rect& f : faces) {
+                f = cv::Rect(static_cast<int>(f.x * inv),
+                             static_cast<int>(f.y * inv),
+                             static_cast<int>(f.width * inv),
+                             static_cast<int>(f.height * inv));
+            }
         }
     } else {
         // ── fail-closed 경로 ─────────────────────────────────────────
@@ -249,11 +307,13 @@ FaceMaskResult FaceMasker::Apply(void* frame_mat) {
         if (params_.fallback_mask_upper) {
             const int h = static_cast<int>(
                 frame.rows * std::clamp(params_.fallback_upper_ratio, 0.1, 1.0));
-            MaskRoi(frame, cv::Rect(0, 0, frame.cols, h), params_);
+            const cv::Rect roi(0, 0, frame.cols, h);
+            MaskRoi(frame, roi, params_);
             r.applied       = true;
             r.used_fallback = true;
             r.safe_to_emit  = true;
             r.backend       = "fallback";
+            r.boxes.push_back({0, roi.x, roi.y, roi.width, roi.height});
             return r;
         }
         // 폴백조차 꺼져 있으면 내보내지 않는다.
@@ -261,8 +321,18 @@ FaceMaskResult FaceMasker::Apply(void* frame_mat) {
         return r;
     }
 
+    // 번호가 프레임마다 흔들리지 않도록 화면 왼쪽부터 정렬해 매긴다.
+    std::sort(faces.begin(), faces.end(),
+              [](const cv::Rect& a, const cv::Rect& b) { return a.x < b.x; });
+
+    int idx = 0;
     for (const cv::Rect& f : faces) {
-        MaskRoi(frame, ExpandRect(f, params_.expand_ratio), params_);
+        const cv::Rect roi = ExpandRect(f, params_.expand_ratio);
+        MaskRoi(frame, roi, params_);            // 먼저 가리고
+        DrawFaceLabel(frame, roi, ++idx, params_); // 그 위에 번호를 새긴다
+        const cv::Rect clipped = roi & cv::Rect(0, 0, frame.cols, frame.rows);
+        r.boxes.push_back({idx, clipped.x, clipped.y,
+                           clipped.width, clipped.height});
     }
     r.faces        = static_cast<int>(faces.size());
     r.applied      = !faces.empty();
