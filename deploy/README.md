@@ -7,6 +7,7 @@ v5 에서 신설. 이전에는 `.service` 파일이 레포에 0 개였고, "`ECO
 ## 파일
 
 - `ecowarden.service` — systemd unit 템플릿 (자동 시작, 장애 시 재시작)
+- `ecowarden-photo.service` — 증거 사진 HTTP 서버(`pi_photo_server.py`) unit 템플릿 (Unity 우회 경로, 선택)
 
 ## systemd 설치
 
@@ -58,17 +59,18 @@ v5 의 `ecowarden.service` 는 `Environment=ECOWARDEN_DRY_RUN=0` 을 **명시**�
   # 또는 CSV 를 pandas/Excel 에서 읽어 시계열 분석
   ```
 
-## 회귀 게이트 (v5)
+## 회귀 게이트
 
 운영 배포 전, 본 레포 루트에서 아래를 통과해야 한다:
 
 ```
 cd build && cmake --build . -j4
 ./rplidar_sim
-# 기대: SUMMARY: 4 / 4 PASS, exit code 0
+# 기대: SUMMARY: N / N PASS (전부 통과), exit code 0
+#   v56 기준 33 / 33 (시나리오 28종 + 단위 테스트 5종)
 ```
 
-sim 회귀 스위트가 실패하면 배포 금지. 4/4 통과가 v5 머지 게이트.
+sim 회귀 스위트가 하나라도 실패하면 배포 금지.
 
 ## 검증
 

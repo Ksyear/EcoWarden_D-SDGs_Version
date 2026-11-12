@@ -97,11 +97,14 @@ find_package(nlohmann_json 3.11 QUIET)
 if(NOT nlohmann_json_FOUND)
   message(STATUS "nlohmann_json not found via apt, fetching from GitHub...")
   include(FetchContent)
+  # 릴리스 tarball(헤더만, 약 100KB)을 받는다. git clone 은 테스트 데이터까지
+  # 딸려 와 빌드 디렉터리마다 약 180MB 를 차지했다 (nlohmann 공식 권장 방식).
+  if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)   # URL 다운로드 타임스탬프 경고 제거 (CMake 3.24+)
+  endif()
   FetchContent_Declare(
     nlohmann_json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG        v3.11.3
-    GIT_SHALLOW    TRUE
+    URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
   )
   FetchContent_MakeAvailable(nlohmann_json)
 else()

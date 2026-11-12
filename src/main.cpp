@@ -92,6 +92,22 @@ int main(int argc, char *argv[]) {
 
     ecowarden::ScanProcessor   processor(fp, dp);
 
+    // 감도 설정이 실제로 적용됐는지 시작 시 눈으로 확인할 수 있게 찍는다.
+    //   (헤더 변경이라 재빌드를 안 하면 반영되지 않는다 — 그 확인용이기도 하다)
+    std::printf("[DUMP-TUNE] 감도=%s | 확정프레임 T/S/M/L/XL=%u/%u/%u/%u/%u"
+                " | 최소관측=%u | 투기자 최소이동=%.0fmm/최소age=%u\n"
+                "[DUMP-TUNE] 분리반경 max=%.0fmm min=%.0fmm split=%.0fmm"
+                " | suspect 전환 age 상한=%u\n",
+                ecowarden::EnvString("ECOWARDEN_DUMP_SENSITIVITY", "high").c_str(),
+                tp.dump_frames_tiny, tp.dump_frames_small, tp.dump_frames_medium,
+                tp.dump_frames_large, tp.dump_frames_xl,
+                tp.dump_confirm_min_total_matches,
+                tp.min_walk_dist_mm, tp.min_age_for_dump,
+                tp.separation_max_dist_mm,
+                tp.separation_min_dist_from_current_mm,
+                tp.split_match_radius_mm,
+                tp.dump_candidate_birth_frames);
+
     // ── 2. 배경 필터 및 추적기 설정 ──────────────────────────────────
     ecowarden::BackgroundFilter bg_filter(bgp);
     ecowarden::ClusterTracker  tracker(tp);
@@ -484,34 +500,40 @@ int main(int argc, char *argv[]) {
                 //   LiDAR 기하 특징으로 사람/동물/불명을 가르고 등급을
                 //   매긴다. noise 로 분류되면 이벤트 자체를 올리지 않아
                 //   반사·스파이크로 인한 헛알림을 줄인다.
-                ecowarden::LidarFeatures lf;
-                lf.width_mm = tr.person_group_id ? tr.person_group_width_mm
-                                                 : tr.width_mm;
-                lf.speed_mm_s =
-                    std::hypot(tr.x_mm - tr.prev_x_mm, tr.y_mm - tr.prev_y_mm) *
-                    10.0;   // 10Hz → mm/s
-                lf.age_frames        = tr.age;
-                lf.match_frames      = tr.total_match_count;
-                lf.stationary_frames = tr.stationary_count;
-                lf.in_person_group   = tr.person_group_id != 0;
-                lf.was_moving        = tr.was_moving;
+                //   ECOWARDEN_CLASSIFY=0 이면 분류를 건너뛰고 IntrusionEvent
+                //   기본값(사람/high)을 그대로 쓴다 — 분류기 도입 전 동작.
+                ecowarden::ClassifyResult cr;
+                cr.reason = "분류기 비활성";
+                if (classifier_params.enable) {
+                    ecowarden::LidarFeatures lf;
+                    lf.width_mm = tr.person_group_id ? tr.person_group_width_mm
+                                                     : tr.width_mm;
+                    lf.speed_mm_s =
+                        std::hypot(tr.x_mm - tr.prev_x_mm,
+                                   tr.y_mm - tr.prev_y_mm) *
+                        10.0;   // 10Hz → mm/s
+                    lf.age_frames        = tr.age;
+                    lf.match_frames      = tr.total_match_count;
+                    lf.stationary_frames = tr.stationary_count;
+                    lf.in_person_group   = tr.person_group_id != 0;
+                    lf.was_moving        = tr.was_moving;
 
-                const ecowarden::ClassifyResult cr =
-                    classifier.ClassifyFromLidar(lf);
-                const ecowarden::EventSeverity sev =
-                    ecowarden::GradeEvent(cr, /*restricted_zone=*/true);
+                    cr = classifier.ClassifyFromLidar(lf);
+                    const ecowarden::EventSeverity sev =
+                        ecowarden::GradeEvent(cr, /*restricted_zone=*/true);
 
-                if (sev == ecowarden::EventSeverity::kIgnore) {
-                    std::printf("[CLASSIFY] zone %d 이벤트 무시 — %s (%s)\n",
-                                zone, ecowarden::ObjectClassToString(cr.cls),
-                                cr.reason.c_str());
-                    continue;
+                    if (sev == ecowarden::EventSeverity::kIgnore) {
+                        std::printf("[CLASSIFY] zone %d 이벤트 무시 — %s (%s)\n",
+                                    zone, ecowarden::ObjectClassToString(cr.cls),
+                                    cr.reason.c_str());
+                        continue;
+                    }
+
+                    ievt.object_class = ecowarden::ObjectClassToString(cr.cls);
+                    ievt.severity     = ecowarden::EventSeverityToString(sev);
+                    ievt.event_type   = ecowarden::EventTypeForClass(cr.cls);
+                    ievt.classify_confidence = cr.confidence;
                 }
-
-                ievt.object_class = ecowarden::ObjectClassToString(cr.cls);
-                ievt.severity     = ecowarden::EventSeverityToString(sev);
-                ievt.event_type   = ecowarden::EventTypeForClass(cr.cls);
-                ievt.classify_confidence = cr.confidence;
 
                 std::printf("\a[!!] RESTRICTED ZONE INTRUSION: person %u in zone %d at (%.0f, %.0f)"
                             " — %s/%s (%s, conf=%.2f)\n",

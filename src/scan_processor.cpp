@@ -63,8 +63,9 @@ size_t ScanProcessor::Process(const ScanFrame& raw, std::vector<Cluster>& cluste
 }
 
 // ── 노이즈 필터 ─────────────────────────────────────────────────────
-//   거리 0~30mm: 센서 근접 노이즈 제거
-//   거리 12000mm 초과: RplidarS2 최대 측정거리 초과 → 무효
+//   min_distance_mm 이하(운영값 150mm): 센서 근접 노이즈 제거
+//   max_distance_mm 초과(운영값 12000mm): 감시 범위 밖 → 무효
+//   FOV(운영값 0~180°) 밖, min_intensity 미만도 제거
 void ScanProcessor::FilterNoise(const ScanFrame& raw, ScanFrame& filtered) {
     filtered.clear();
     filtered.reserve(raw.size());
@@ -263,7 +264,7 @@ void ScanProcessor::RangeQueryGrid(
 
 // ── DBSCAN 클러스터링 ───────────────────────────────────────────────
 //   epsilon  = 100mm  (이웃 탐색 반경, production_params.h 참조)
-//   minPts   = 5      (코어 포인트 조건)
+//   minPts   = 3      (코어 포인트 조건, production_params.h 참조)
 //
 //   알고리즘:
 //   1. 모든 포인트를 UNVISITED로 초기화

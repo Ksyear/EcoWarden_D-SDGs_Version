@@ -132,6 +132,11 @@ public:
         for (auto it = pending_.begin(); it != pending_.end();) {
             Pending& pd = *it;
 
+            // 확정 프레임 자체는 관찰 창에 넣지 않는다. main 은 OnDumpConfirmed
+            // 와 같은 프레임에 Update 를 부르므로, 세면 N+1 회 관측되어
+            // "21/20 프레임" 처럼 창 길이를 넘는 값이 서버로 나간다.
+            if (frame == pd.start_frame) { ++it; continue; }
+
             // 투기물 / 투기 주체 트랙 탐색. person_track_id 는 그룹 ID 일
             // 수 있으므로 (v33) track id 와 person_group_id 양쪽을 본다.
             const Track* obj = nullptr;

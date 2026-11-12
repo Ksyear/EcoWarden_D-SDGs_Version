@@ -1360,6 +1360,22 @@ static bool RunDumpValidationUnitTest() {
                "정상 확정은 취소 목록에 들어가지 않는다");
     }
 
+    // Case H: main 루프는 확정과 같은 프레임에 Update 를 부른다. 그 프레임을
+    //   세면 재관측 수가 창 길이를 넘는다 (6/5 → 서버에 100% 초과 전송).
+    {
+        ecowarden::DumpValidator dv(p);
+        dv.OnDumpConfirmed(make_evt(53), "", 2, false, false, 900);
+        std::vector<ecowarden::ValidatedDump> out;
+        for (uint32_t f = 900; f <= 905; f++) {   // 900 = 확정 프레임
+            std::vector<ecowarden::Track> tracks;
+            tracks.push_back(make_track(53, 1000.0, 2000.0));
+            dv.Update(tracks, f, &out);
+        }
+        expect(out.size() == 1 && out[0].observed_frames == 5 &&
+                   out[0].window_frames == 5,
+               "확정 프레임은 관찰 창에서 제외 (observed <= window)");
+    }
+
     std::printf("─────────────────────────────────────────────────────\n");
     std::printf("SCENARIO: DV_dump_validation_unit (unit test)\n");
     std::printf("─────────────────────────────────────────────────────\n");

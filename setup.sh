@@ -57,8 +57,8 @@ if [ -n "$CASCADE_FOUND" ]; then
     echo "   -> cascade OK: $CASCADE_FOUND"
 else
     echo "   -> cascade not found in system paths, downloading to models/ ..."
-    mkdir -p models
-    if curl -fsSL -o models/haarcascade_frontalface_default.xml \
+    mkdir -p "${SCRIPT_DIR}/models"
+    if curl -fsSL -o "${SCRIPT_DIR}/models/haarcascade_frontalface_default.xml" \
         https://raw.githubusercontent.com/opencv/opencv/4.x/data/haarcascades/haarcascade_frontalface_default.xml
     then
         echo "   -> saved models/haarcascade_frontalface_default.xml"
@@ -98,12 +98,15 @@ echo "   -> /dev/rplidar and /dev/gpiochip* permissions configured"
 
 echo "[5/8] Preparing Slamtec rplidar_sdk..."
 mkdir -p "${SCRIPT_DIR}/thirdparty"
-if [ ! -d "${SDK_DIR}/.git" ]; then
-    rm -rf "${SDK_DIR}"
-    git clone https://github.com/Slamtec/rplidar_sdk.git "${SDK_DIR}"
+# SDK 는 저장소에 동봉돼 있다(오프라인 빌드 보장). 동봉본이 있으면 그대로 쓰고,
+# 없을 때만 내려받는다. 예전에는 .git 이 없다는 이유로 동봉본을 지우고 매번
+# upstream master 를 다시 받았다 — 오프라인에서는 SDK 가 사라지고, 온라인에서는
+# 검증하지 않은 버전으로 바뀌었다.
+if [ -f "${SDK_DIR}/sdk/include/sl_lidar.h" ]; then
+    echo "   -> using vendored rplidar_sdk"
 else
-    git -C "${SDK_DIR}" fetch --depth=1 origin master || true
-    git -C "${SDK_DIR}" pull --ff-only || true
+    rm -rf "${SDK_DIR}"
+    git clone --depth=1 https://github.com/Slamtec/rplidar_sdk.git "${SDK_DIR}"
 fi
 
 if [ ! -f "${SDK_DIR}/sdk/include/sl_lidar.h" ]; then

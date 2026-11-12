@@ -13,32 +13,20 @@
  * @brief 클러스터 + 이벤트 데이터를 nlohmann/json으로 직렬화하여 UDP 전송
  * @date  2026
  *
- * JSON 패킷 구조:
+ * JSON 패킷 구조 (실제 직렬화는 json_packet.cpp 의 Serialize(), 필드 명세의
+ * 단일 출처는 보안/통신_명세.md §1):
  * {
+ *   "type": "FRAME",
  *   "frame_id": 42,
- *   "timestamp": "2026-03-27T12:34:56.789Z",
- *   "clusters": [
- *     {
- *       "id": 0,
- *       "x": 1200.0,
- *       "y": 350.0,
- *       "count": 12,
- *       "type": "normal"        ← normal / abandoned
- *     }
- *   ],
- *   "event": null               ← 이벤트 없으면 null
- *   // 또는
- *   "event": {
- *     "type": "abandoned",
- *     "x": 800.0,
- *     "y": 200.0,
- *     "cluster_id": 1,
- *     "timestamp": "2026-03-27T12:34:56.789Z"
- *   }
+ *   "timestamp": 1774614896789,          ← epoch ms
+ *   "objects": [ {"id", "x", "y", "type", "width", "is_abandoned", ...} ],
+ *   "tracks":  [ {"id", "x", "y", "state", "is_dumped_item", ...} ],
+ *   "points":  [ [x, y], ... ],          ← 시각화기 모드에서만 채움
+ *   "events":  [ {"type": "intrusion" | "dumping" | "departure", ...} ]
  * }
  *
- * 최대 패킷 크기: 65507 bytes (UDP 최대 payload)
- * 초과 시 클러스터를 포인트 수 내림차순으로 정렬 후 잘라냄.
+ * 최대 패킷 크기: 65507 bytes (UDP 최대 payload).
+ * 초과하면 잘라 보내지 않고 그 프레임 전송을 건너뛴다 (Send 가 false 반환).
  */
 
 #pragma once

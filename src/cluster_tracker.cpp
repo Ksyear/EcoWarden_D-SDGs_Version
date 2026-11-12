@@ -18,7 +18,8 @@
  *   2. 매칭된 트랙의 centroid 이동거리로 이동/정지 판정 + 누적 이동거리 갱신
  *   3. "이동 이력 있음 + 연속 정지 ≥ departure_frame_count" → 이탈 이벤트
  *   4. 미매칭 클러스터 중 기존 트랙 이전 위치 근처에 나타난 것 → 투기 의심 물체
- *   5. 투기 의심 물체가 dump_stationary_frame_count 이상 정지 → 투기 확정
+ *   5. 투기 의심 물체가 크기 band 별 dump_frames_* 이상 안정 + 투기 주체 이탈
+ *      → 투기 확정 (판정은 dump_detector.h)
  *   6. 매칭 실패 트랙은 lost_age_limit 초과 시 삭제
  */
 
@@ -386,8 +387,6 @@ void ClusterTracker::UpdatePersonGroups() {
         }
     }
 
-    const double pair_sq =
-        params_.person_group_pair_radius_mm * params_.person_group_pair_radius_mm;
     const double wide_pair_sq =
         params_.person_group_wide_pair_radius_mm *
         params_.person_group_wide_pair_radius_mm;
@@ -491,19 +490,9 @@ void ClusterTracker::UpdatePersonGroups() {
                 if (crowded) continue;
             }
 
-            const double speed_i_sq =
-                tracks_[i].vx_mm * tracks_[i].vx_mm + tracks_[i].vy_mm * tracks_[i].vy_mm;
-            const double speed_j_sq =
-                tracks_[j].vx_mm * tracks_[j].vx_mm + tracks_[j].vy_mm * tracks_[j].vy_mm;
-            const double min_speed_sq =
-                params_.leg_track_min_move_mm * params_.leg_track_min_move_mm;
-
-            // 보행 중 양쪽 다리는 anti-phase로 움직일 수 있다. dot <= 0을
-            // hard reject하면 보폭이 벌어지는 순간 group 생성이 실패한다.
-            (void)speed_i_sq;
-            (void)speed_j_sq;
-            (void)min_speed_sq;
-
+            // 속도/방향 게이트는 일부러 두지 않는다. 보행 중 양쪽 다리는
+            // anti-phase로 움직일 수 있어, dot <= 0을 hard reject하면 보폭이
+            // 벌어지는 순간 group 생성이 실패한다.
             const uint32_t group_id = std::min(tracks_[i].id, tracks_[j].id);
             assign_group(i, j, group_id);
             tracks_[i].person_group_hold_count = params_.person_group_hold_frames;
@@ -816,7 +805,7 @@ void ClusterTracker::Update(const std::vector<Cluster>& clusters,
     dd.EvaluateSuspects();
 
     // ── 5단계: lost_age_limit 초과 트랙 삭제 ────────────────────────
-    //   투기 확정 물체(is_dumped_item)는 3배 더 오래 유지
+    //   투기 확정/의심 물체는 dumped_item_lost_age_limit 만큼 더 오래 유지
     //   삭제되는 일반 트랙의 위치를 기록하여 오인식 방지
     tracks_.erase(
         std::remove_if(tracks_.begin(), tracks_.end(),

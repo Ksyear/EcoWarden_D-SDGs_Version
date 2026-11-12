@@ -178,7 +178,7 @@ inline TrackerParams DefaultTrackerParams() {
 
     // ── 투기 감지 감도 프리셋 ────────────────────────────────────────
     //
-    //   ECOWARDEN_DUMP_SENSITIVITY = high | normal | low   (기본 high)
+    //   ECOWARDEN_DUMP_SENSITIVITY = max | high | normal | low   (기본 high)
     //
     //   여러 게이트를 따로 만지면 서로 상쇄되기 쉬워서, 함께 움직여야
     //   하는 값들을 한 덩어리로 묶었다.
@@ -210,6 +210,36 @@ inline TrackerParams DefaultTrackerParams() {
             //   3→2 로 낮췄더니 회귀 K_reflective_spike_near_path 가 투기로
             //   확정됐다. 사람이 내려놓은 쓰레기는 분리 신호(폭 감소/분열/
             //   궤적 근접)가 함께 오므로 이 게이트를 안 거쳐도 잡힌다.
+        } else if (sens == "max") {
+            // ── 최대 감도 ────────────────────────────────────────────
+            //   high 에 더해 **분리 감지 조건 자체**를 푼다. high 는 "확정
+            //   단계" 만 풀어서 실측상 효과가 없었다 (회귀 확정 건수 12건
+            //   → 12건, 변화 없음). 실제로 막는 건 그 앞단이다:
+            //     no_direct_evidence  — 사람↔물체 분리 신호가 안 잡힘
+            //     not_stable          — 트랙 안정화 대기
+            //   그래서 분리 판정 반경·투기자 조건을 함께 넓힌다.
+            //
+            //   오탐이 늘어난다. 관리자가 사진으로 거르는 것을 전제로 한다.
+            tp.dump_frames_tiny   = 2;
+            tp.dump_frames_small  = 2;
+            tp.dump_frames_medium = 2;
+            tp.dump_frames_large  = 2;
+            tp.dump_frames_xl     = 2;
+            tp.dump_confirm_min_total_matches = 3;   // 반사 하한 — 더 못 내림
+            tp.fast_confirm_min_frames        = 2;
+            tp.source_lost_confirm_frames     = 3;
+
+            // 투기 주체 조건 완화 — 조금만 걸어도, 금방 나타난 사람도 인정
+            tp.min_walk_dist_mm   = 200.0;   // 500 → 200
+            tp.min_age_for_dump   = 5;       // 10 → 5
+
+            // 분리 판정 반경 확대 — 사람에서 더 멀리/가까이 떨어져도 인정
+            tp.separation_max_dist_mm = 1000.0;              // 600 → 1000
+            tp.separation_min_dist_from_current_mm = 80.0;   // 120 → 80
+            tp.split_match_radius_mm  = 400.0;               // 250 → 400
+
+            // 정지 트랙이 suspect 로 전환될 수 있는 age 상한 확대
+            tp.dump_candidate_birth_frames = 60;             // 30 → 60
         } else if (sens == "low") {
             tp.dump_frames_tiny   = 8;
             tp.dump_frames_small  = 8;
@@ -332,13 +362,15 @@ inline DumpValidationParams DefaultDumpValidationParams() {
     // 감지 감도와 함께 움직인다. high 에서 재검증이 빡빡하면 애써 확정한
     // 투기를 다시 취소해 버려서 감도를 올린 의미가 없어진다.
     //   - 관찰 창을 30→20프레임(3초→2초)으로 줄여 확정이 빨리 나가고
-    //   - 재관측 비율 하한을 0.5→0.3 으로 낮추고 (LiDAR 가 몇 프레임 놓쳐도 통과)
     //   - 허용 이동량을 300→500mm 로 넓힌다 (centroid 흔들림 흡수)
     //     실제로 현장 로그에서 object 15 가 "300mm 초과 이동" 으로 취소됐다.
+    //   (재관측 비율 하한 0.5 는 유지 — 이유는 아래 블록 주석 참조)
     {
         const std::string sens =
             EnvString("ECOWARDEN_DUMP_SENSITIVITY", "high");
-        if (sens == "high") {
+        // max 도 high 와 같은 재검증 값을 쓴다. 분기가 없으면 구조체 기본값
+        // (30프레임/300mm)으로 떨어져 max 가 high 보다 더 빡빡하게 취소된다.
+        if (sens == "high" || sens == "max") {
             // 관찰 창은 줄이고(확정이 빨리 나감) 이동 허용은 넓히되,
             // **재관측 비율은 낮추지 않는다.**
             //   이 비율이 반사·고스트를 걸러내는 유일한 장치다. 감지 게이트와

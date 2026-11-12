@@ -27,7 +27,8 @@ Environment=ECOWARDEN_DRY_RUN=0
 #     echo 'ECOWARDEN_API_KEY=<새 키>' | sudo tee /etc/ecowarden/secrets.conf
 #   '-' 접두사: 파일이 없어도 서비스는 기동된다.
 #   ⚠ v56부터 레거시 키 fallback 이 제거됐다 — 키가 없으면 서버 전송이
-#     비활성되고 이벤트는 로컬 큐에만 쌓인다 (유실은 없지만 서버엔 안 감).
+#     비활성되고 HTTP 이벤트는 큐에 쌓이지 않고 폐기된다 (Unity UDP 전송과
+#     기기 내 사진·영상 저장은 그대로 동작).
 EnvironmentFile=-/etc/ecowarden/secrets.conf
 
 # ECOWARDEN_PROFILE_CSV (v5 [2 PROFILE]):

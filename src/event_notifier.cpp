@@ -49,8 +49,8 @@ EventNotifier::EventNotifier(const NotifierConfig& cfg) : cfg_(cfg) {
     //   이전 버전은 키가 없으면 저장소 이력에 노출된 키로 조용히 폴백했다.
     //   그 키는 공개 저장소에서 누구나 읽을 수 있으므로 "인증"이 아니었고,
     //   경고 로그를 띄워도 운영 중엔 아무도 보지 않는다. 이제는 키가 없으면
-    //   **전송을 시도하지 않고 로컬 큐에만 쌓는다** — 사고가 조용히
-    //   지나가는 대신 눈에 띄게 만든다 (fail-closed).
+    //   **전송을 시도하지 않는다** (fail-closed). 보낼 서버가 없는 구성이므로
+    //   이벤트는 큐에 쌓지 않고 폐기한다 — SendLoop 주석 참조.
     if (cfg_.api_key.empty()) {
         if (const char* env = std::getenv("ECOWARDEN_API_KEY")) {
             if (env[0] != '\0') cfg_.api_key = env;
@@ -273,8 +273,8 @@ std::string EventNotifier::IntrusionToJson(const IntrusionEvent& evt,
 //       에 쌓이지 않고 dropped_count_ 증가 후 폐기되도록 한다 (SendLoop 패치 참조).
 //
 bool EventNotifier::HttpPost(const std::string& url, const std::string& json_body) {
-    // v56 fail-closed: 키가 없으면 아예 보내지 않는다. false 를 돌려주면
-    // SendLoop 가 로컬 큐에 보존하므로 이벤트가 유실되지는 않는다.
+    // v56 fail-closed: 키가 없으면 아예 보내지 않는다. SendLoop 는 이 경우를
+    // dry_run 과 같이 취급해 큐에 쌓지 않고 dropped_count_ 만 올린다.
     if (cfg_.api_key.empty()) return false;
 
     if (cfg_.dry_run) {
@@ -592,7 +592,7 @@ void EventNotifier::SendLoop() {
 // ── 서버 미설정 안내 (주기적, 스팸 방지) ────────────────────────────
 //
 //   백엔드 없이 Unity 만 쓰는 구성이 정상적인 운용 형태이므로 에러가 아니라
-//   "이런 상태로 돌고 있다" 는 안내로 취급한다. 50건마다 한 번만 찍는다.
+//   "이런 상태로 돌고 있다" 는 안내로 취급한다. 첫 건과 200건마다 한 번만 찍는다.
 void EventNotifier::MaybeWarnNoServer() {
     const size_t n = dropped_count_.load();
     if (n == 1 || n % 200 == 0) {

@@ -80,7 +80,7 @@ Output Layer
 ├─ JsonPacketSender → 시각화기 UDP (JSON, 127.0.0.1:9090)
 ├─ UdpSender → Unity 바이너리 프로토콜 (옵션, ECOWARDEN_UNITY_BINARY=1)
 ├─ EventNotifier → HTTP POST dumping-event / intrusion-event (X-API-Key)
-│ └─ v56: 키 없으면 전송 안 하고 로컬 큐 보존 (fail-closed)
+│ └─ v56: 키 없으면 전송 안 함 (fail-closed, HTTP 이벤트는 폐기 — 큐 미적재)
 ├─ ServoController → suspect/person 좌표를 5-zone으로 변환해 카메라 조준/저장
 └─ CameraModule
    ├─ 사진 경로  PrepareEvidenceFrame() → JPEG
@@ -106,11 +106,11 @@ Output Layer
 
 | 관심사 | 단일 출처 | 파일 |
 | :--- | :--- | :--- |
-| **운영 파라미터** | `production_params.h` | `Default*Params()` 4종 inline 함수 |
+| **운영 파라미터** | `production_params.h` | `Default*Params()` 12종 inline 함수 |
 | **시간 유틸리티** | `time_utils.h` | `NowMs()`, `MsToIso8601()`, `MsToApiTime()` |
 | **칼만 필터 수학** | `kalman_filter.h` | header-only, Joseph form 수치 안정 |
 | **트랙 상태 머신** | `cluster_tracker.h` | `TrackState` enum + `Track` struct |
-| **프레임 프로파일** | `phase_profiler.h` | 10-phase CSV export |
+| **프레임 프로파일** | `phase_profiler.h` | 8-phase CSV export |
 
 ### 2.3 신호 노이즈 전파 차단 구조
 
@@ -120,7 +120,7 @@ Raw LiDAR (noisy)
   ↓ [Gate 2] FilterStaticBackground: confidence ≥ 10 + neighbor guard + 150mm margin
   ↓ [Gate 3] DBSCAN: ε=100mm, min_pts=3 → NOISE 레이블 제거
   ↓ [Gate 4] Width filter: ∈ [50, 1200]mm
-  ↓ [Gate 5] MergeClusters: centroid ≤ 350mm + width ratio ≤ 2.5
+  ↓ [Gate 5] MergeClusters: centroid ≤ 120mm + width ratio ≤ 2.5
   ↓ [Gate 6] Association: greedy NN ≤ 400mm + KF fallback capped at 500mm
   ↓ [Gate 7] Track confidence: Tentative → Confirmed (4 consecutive matches)
   ↓ [Gate 8] PersonGroup: anti-phase 보행을 허용하며 leg track을 사람 1명으로 그룹화
@@ -204,8 +204,9 @@ rplidar_app ──UDP JSON──→ Unity PC (192.168.20.102:5005) ← 와이파
 | `ECOWARDEN_INTRUSION_URL` | (자동 유도) | intrusion 이벤트 endpoint. 미설정 시 dumping URL에서 `intrusion-event`로 치환 |
 | `ECOWARDEN_INTRUSION_NOTIFY` | 기본 `1` | `0`이면 침입 이벤트 서버 전송만 끔 (촬영/블랙박스/로그는 유지) |
 | `ECOWARDEN_DUMP_VALIDATE` | 기본 `1` | 투기 확정 후 재검증 (§4.6.1). `0`이면 기존처럼 확정 즉시 전송 |
-| `ECOWARDEN_DUMP_VALIDATE_FRAMES` | 기본 `30` | 확정 후 투기물 잔존 관찰 프레임 수 (10Hz 기준 약 3초) |
-| `ECOWARDEN_DUMP_VALIDATE_MAX_MOVE_MM` | 기본 `300` | 관찰 중 투기물이 이 이상 이동하면 취소 (정지 투기물 아님) |
+| `ECOWARDEN_DUMP_SENSITIVITY` | 기본 `high` | 투기 감지 감도 프리셋 `max` / `high` / `normal` / `low`. 확정 프레임·재검증 값을 한꺼번에 바꾼다 (`production_params.h`). 아래 재검증 기본값은 `high` 기준 |
+| `ECOWARDEN_DUMP_VALIDATE_FRAMES` | 기본 `20` | 확정 후 투기물 잔존 관찰 프레임 수 (10Hz 기준 약 2초). `normal` 30 / `low` 40 |
+| `ECOWARDEN_DUMP_VALIDATE_MAX_MOVE_MM` | 기본 `500` (`normal` 300 / `low` 250) | 관찰 중 투기물이 이 이상 이동하면 취소 (정지 투기물 아님) |
 | `ECOWARDEN_DUMP_VALIDATE_MIN_PRESENT` | 기본 `0.5` | 관찰 창 최소 재관측 비율 — 미달 시 고스트/반사로 보고 취소 |
 | `ECOWARDEN_DUMP_VALIDATE_HIGH_PRESENT` | 기본 `0.8` | `confidence="high"` 재관측 비율 기준 (투기자 이탈 동반 시) |
 | `ECOWARDEN_DUMP_VALIDATE_DEPART_MM` | 기본 `1200` | 투기 주체가 투기물에서 이 이상 멀어지면 "이탈" 판정 |
@@ -220,7 +221,7 @@ rplidar_app ──UDP JSON──→ Unity PC (192.168.20.102:5005) ← 와이파
 | `ECOWARDEN_CLIP_UPLOAD` | 기본 `1` | 블랙박스 클립 서버 업로드 (§3.8). 서버 `evidence-clip` 준비 전 `0` |
 | `ECOWARDEN_CLIP_URL` | (자동 유도) | 클립 업로드 endpoint. 미설정 시 dumping URL에서 `evidence-clip`으로 치환 |
 | `ECOWARDEN_CLIP_TIMEOUT_MS` | 기본 `120000` | 클립(수십 MB) 전용 업로드 타임아웃 |
-| `ECOWARDEN_API_KEY` | (비밀값) | FastAPI `X-API-Key`. 미설정 시 노출된 레거시 키로 fallback + 경고 로그 |
+| `ECOWARDEN_API_KEY` | (비밀값) | FastAPI `X-API-Key`. 미설정 시 서버 전송 비활성(v56 — 레거시 키 fallback 제거, HTTP 이벤트 폐기). Unity UDP·기기 내 저장은 정상 |
 | `ECOWARDEN_QUEUE_FILE` | 기본 `/tmp/rplidar_event_queue.jsonl` | 전송 실패 이벤트 큐 파일 경로. 운영 배포는 `/var/lib/ecowarden/` 권장 |
 
 #### 프라이버시 2계층 — 얼굴 마스킹 (v56, §3.9)
@@ -293,8 +294,8 @@ rplidar_app ──UDP JSON──→ Unity PC (192.168.20.102:5005) ← 와이파
 벤치 테스트:
 
 ```bash
-cmake --build build-codex --target servo_sweep_test
-sudo ./build-codex/servo_sweep_test
+cmake --build build --target servo_sweep_test
+sudo ./build/servo_sweep_test
 ```
 
 운영 중에는 한 번 선택한 사람/사람그룹 ID를 계속 추적하고, 해당 좌표를 `0, 45, 90, 135, 180도` zone으로 변환해 카메라를 조준한다. 사진은 `captures/person_zones/person_<id>/`에 임시 보관한다. 같은 zone은 기본 2초 간격으로만 다시 찍고, zone이 바뀌면 즉시 새 사진을 남긴다. 사람이 사라진 뒤 기본 3초 동안 투기 확정이 없으면 해당 `person_<id>` 폴더를 삭제한다. 투기 확정 시에는 해당 사람 폴더를 `captures/dumps/<event>/person_<id>/`로 이동한다. 투기 suspect가 발생하면 person zone 촬영보다 suspect 촬영을 우선한다.
@@ -488,7 +489,7 @@ sudo systemctl enable --now ecowarden-photo
 - **가속**: Grid-based spatial index → O(n) average (cell = ε × ε)
 - **scratch 재사용**: `scratch_grid_`, `scratch_labels_`, `scratch_neighbors_` 멤버 영속화
 - **소형 객체 대응**: `min_points=3`으로 15cm 높이에서 점 3~4개만 남는 투기물 후보 보존
-- **후처리**: Union-Find 기반 다리 병합 (기본 350mm, width ratio 2.5 guard)
+- **후처리**: Union-Find 기반 다리 병합 (기본 120mm, width ratio 2.5 guard)
 - **다리쌍 확장 병합**: 코드 지원은 있으나 운영 기본값은 비활성(`leg_pair_merge_radius_mm=0`). 현장 로그에서 보폭 분리가 남을 때만 450mm부터 실측 적용
 
 ### 4.3 정적 배경 학습 보호
@@ -531,9 +532,9 @@ sudo systemctl enable --now ecowarden-photo
 판정 FSM 을 더 조이는 대신, 확정 **뒤에** 물리적 사실 하나를 검증한다: *진짜 버려진 쓰레기는 확정 후에도 그 자리에 정지 상태로 남고, 반사/고스트/잔상은 수 초 안에 사라지거나 움직인다.*
 
 - 확정 순간의 증거(서보 사진·dump bundle·블랙박스 요청)는 기존대로 **즉시** 확보 — 투기자가 떠나기 전에 찍어야 하므로 지연하지 않는다
-- **서버 전송과 Unity `dumping` 이벤트만** 기본 30프레임(약 3초) 잔존 확인 후 내보낸다
+- **서버 전송과 Unity `dumping` 이벤트만** 기본 20프레임(약 2초, 감도 `high` 기준) 잔존 확인 후 내보낸다
 - 통과 시 페이로드에 `confidence`(`"high"`: 재관측 ≥80% + 투기자 이탈 / `"medium"`)와 `validated_frames`/`validate_window` 필드 추가 → **관리자가 "얼마나 확실한 확정인지" 보고 검토 우선순위를 정할 수 있다** (additive 필드 — 기존 서버 호환)
-- 취소 시 `[DUMP-CANCEL]` 로그만 남고 전송·표시되지 않는다 (사라짐 = 고스트/반사, 300mm 초과 이동 = 정지 투기물 아님). 로컬 증거 파일은 원인 분석용으로 유지
+- 취소 시 `[DUMP-CANCEL]` 로그만 남고 전송·표시되지 않는다 (사라짐 = 고스트/반사, 500mm 초과 이동 = 정지 투기물 아님). 로컬 증거 파일은 원인 분석용으로 유지
 - 구현: `include/dump_validation.h` (header-only) + `DV_dump_validation_unit` 단위 테스트. dump_detector FSM·기존 회귀 시나리오 28종은 변경 없음
 
 ---
@@ -680,7 +681,7 @@ chmod +x setup.sh && ./setup.sh
 ```ini
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/rplidar_app /dev/ttyUSB0 https://api.ecowarden.systems/api/dumping-event 192.168.20.102:5005
+ExecStart=/opt/ecowarden/rplidar_app /dev/ttyUSB0 https://api.ecowarden.systems/api/dumping-event 192.168.20.102:5005
 Environment=ECOWARDEN_DRY_RUN=0
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -781,7 +782,7 @@ ProtectSystem=strict
 
 | 파일 | 타깃 | 검증 대상 |
 |------|------|----------|
-| `test/sim_main.cpp` | `rplidar_sim` | 추적·침입·투기 회귀 시나리오 28종 + 단위 테스트 5종(존 정책·투기 재검증·객체 분류·증거 보관소) (§7) |
+| `test/sim_main.cpp` | `rplidar_sim` | 추적·침입·투기 회귀 시나리오 28종 + 단위 테스트 5종(존 정책·투기 재검증·객체 분류·얼굴 마스킹·증거 보관소) (§7) |
 | `test/test_camera.cpp` | `check_camera` | USB 카메라 캡처 |
 | `test/test_lidar.cpp` | `check_lidar` | RPLiDAR S2 USB 연결 |
 | `test/test_pir.cpp` | `check_pir` | PIR 센서 GPIO 17/27 |
