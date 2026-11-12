@@ -93,14 +93,12 @@ public:
 
     size_t GetSentCount()    const { return sent_count_; }
     size_t GetDropCount()    const { return drop_count_; }
-    size_t GetTruncCount()   const { return trunc_count_; }
 
 private:
     UdpSender& udp_;
 
     std::atomic<size_t> sent_count_{0};
-    std::atomic<size_t> drop_count_{0};    // 전송 실패
-    std::atomic<size_t> trunc_count_{0};   // 크기 초과로 클러스터 잘림
+    std::atomic<size_t> drop_count_{0};    // 크기 초과 또는 전송 실패
 
     // departure 는 단발 이벤트라 UDP 패킷 손실 시 Unity 에 humanPrefab
     // 잔상이 영구히 남는다. 이후 N프레임 동안 반복 전송해 손실을 흡수한다.
@@ -133,20 +131,6 @@ private:
         int remaining;
     };
     std::vector<PendingDump> pending_dumps_;
-
-    /**
-     * @brief epoch ms → ISO 8601 문자열
-     */
-    static std::string MsToIso8601(uint64_t epoch_ms);
-
-    /**
-     * @brief 클러스터의 이벤트 타입을 판별
-     *        트랙 상태가 Departed인 경우 "abandoned", 그 외 "normal"
-     */
-    static std::string ResolveType(
-        const Cluster& cluster,
-        const std::vector<Track>& tracks
-    );
 
     static uint64_t NowMs();
 };

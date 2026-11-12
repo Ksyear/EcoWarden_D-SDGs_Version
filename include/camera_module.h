@@ -99,6 +99,14 @@ public:
      */
     void SetEvidenceVault(EvidenceVault* vault);
 
+    /**
+     * @brief image_path 로 저장한 사진의 vault 원본을 파기한다.
+     *
+     *   이벤트 없이 지나간 사람의 임시 사진을 지울 때 함께 불러야 한다.
+     *   안 부르면 마스킹본만 지워지고 원본은 보존기한까지 남는다.
+     */
+    void DiscardOriginal(const std::string& image_path);
+
     // 스레드 시작/정지
     bool Start();
     void Stop();
@@ -172,9 +180,13 @@ private:
 
     // ── 프라이버시 2·3계층 ──────────────────────────────────────────
     FaceMaskParams face_mask_params_;
-    std::unique_ptr<FaceMasker> face_masker_;   // 사진 경로 (메인 루프 스레드)
-    // 블랙박스 저장 worker 전용 — 검출기가 스레드 안전하지 않아 분리한다.
+    // 사진 경로 — 메인 루프와 서보 worker 가 함께 쓰므로 mutex 로 직렬화한다
+    // (검출기는 스레드 안전하지 않다).
+    std::unique_ptr<FaceMasker> face_masker_;
+    std::mutex face_mask_mutex_;
+    // 블랙박스 저장 worker 전용 — 동시 저장 worker 끼리도 직렬화한다.
     std::unique_ptr<FaceMasker> blackbox_masker_;
+    std::mutex blackbox_mask_mutex_;
     EvidenceVault* evidence_vault_ = nullptr;   // 소유하지 않음
 
     BlackboxSavedCallback blackbox_saved_cb_;

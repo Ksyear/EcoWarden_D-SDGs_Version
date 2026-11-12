@@ -72,12 +72,19 @@ Environment=ECOWARDEN_FACE_MASK_MODE=blur
 # Environment=ECOWARDEN_EVIDENCE_RETAIN_DAYS=30
 
 # ── 객체 분류 · 이벤트 등급 (v56, README §3.10) ─────────────────────
-#   기본 ON. 모델을 지정하지 않으면 LiDAR 기하 휴리스틱으로 동작하며
-#   신뢰도 상한 0.7 이 적용된다. 모델을 붙이면 카메라 AI 로 동작.
+#   기본 ON. 현재 판정은 항상 LiDAR 기하 휴리스틱이며 신뢰도 상한 0.7 이
+#   적용된다 (DNN 백엔드는 모델 로드만 되고 메인 루프에는 미연결).
 Environment=ECOWARDEN_CLASSIFY=1
 # Environment=ECOWARDEN_CLASSIFY_MODEL=/opt/ecowarden/models/mobilenet_ssd.caffemodel
 # Environment=ECOWARDEN_CLASSIFY_CONFIG=/opt/ecowarden/models/mobilenet_ssd.prototxt
 # Environment=ECOWARDEN_CLASSIFY_LABELS=/opt/ecowarden/models/labels.txt
+
+# ── 전송 실패 이벤트 큐 ────────────────────────────────────────────
+#   기본 경로(/tmp)는 PrivateTmp 때문에 서비스가 멈추면 사라져 재시작 후
+#   재전송이 안 된다. StateDirectory 가 /var/lib/ecowarden 을 서비스 계정
+#   소유로 만들어 준다 (ProtectSystem=strict 에서도 쓰기 가능).
+StateDirectory=ecowarden
+Environment=ECOWARDEN_QUEUE_FILE=/var/lib/ecowarden/event_queue.jsonl
 
 Restart=on-failure
 RestartSec=5

@@ -73,7 +73,6 @@ struct FilterParams {
   float static_bg_ema_alpha = 0.02f;  // 정적 배경 EMA 학습 속도
   uint8_t static_bg_min_confidence = 10; // 최소 관측 confidence 이후 배경 판정 사용
   uint8_t static_bg_edge_guard_slots = 1; // foreground 판정 시 좌우 슬롯 동의 요구
-  uint16_t static_bg_jump_reject_mm = 500; // 단일 슬롯 순간 점프 reject 기준
   bool reverse_angle = true; // LiDAR 각도 방향 반전 (x 유지, y 좌우 반전)
 };
 
@@ -144,7 +143,6 @@ public:
   void ResetStaticBackground() {
     for (int i = 0; i < 3600; ++i) {
       static_bg_depth_[i] = 0;
-      static_bg_prev_depth_[i] = 0;
       static_bg_confidence_[i] = 0;
     }
   }
@@ -155,7 +153,6 @@ private:
 
   // 360도 공간 0.1도 단위의 정적 배경 깊이 (방의 형태)
   uint16_t static_bg_depth_[3600] = {0};
-  uint16_t static_bg_prev_depth_[3600] = {0};
   uint8_t  static_bg_confidence_[3600] = {0};
 
   static constexpr double kDegToRad = M_PI / 180.0;

@@ -138,7 +138,6 @@ struct Track {
     bool       dump_alert_fired   = false; // 투기 확정 알림 발화 여부
     bool       suspect_fired      = false; // 의심 알림(캡처) 발화 여부
     uint32_t   suspect_confirm_count = 0;  // 분리 후 독립 존재 프레임 카운터
-    std::string suspect_photo_path;        // 의심 시점 캡처 사진 경로 (미확정 시 삭제)
     double     suspect_width_sum    = 0.0; // 의심 기간 중 폭 합계 (크기 일관성 검증용)
     double     suspect_width_sq_sum = 0.0; // 의심 기간 중 폭 제곱 합계 (분산 계산용)
     double     source_last_dist_mm  = 0.0; // source-person 과의 직전 거리
@@ -157,7 +156,6 @@ struct Track {
     std::deque<std::pair<double,double>> position_history;  // 최근 N 프레임 위치
 
     // -- 폭 변화 추적 (투기 물체 분리 보조 신호) --
-    double     prev_width_mm        = 0.0;   // 이전 프레임 클러스터 폭
     bool       width_drop_detected  = false; // 폭 급감 이벤트 감지 플래그
     double     width_drop_x_mm      = 0.0;   // 폭 감소 발생 시점 위치 X
     double     width_drop_y_mm      = 0.0;   // 폭 감소 발생 시점 위치 Y
@@ -224,7 +222,6 @@ struct TrackerParams {
     bool     enable_dumping_detection      = true;   // 투기 감지 활성화
     double   min_walk_dist_mm              = 500.0;  // 투기 주체 최소 누적 이동거리
     uint32_t min_age_for_dump              = 10;     // 투기 주체 최소 생존 프레임
-    uint32_t dump_stationary_frame_count   = 10;     // 투기물 정지 확인 프레임 수 (1초 @ 10Hz)
     double   separation_max_dist_mm        = 600.0;  // 분리 감지 최대 거리 (이전 위치 기준)
 
     // ── 다리 오인식 방지 파라미터 ────────────────────────────────────
@@ -305,12 +302,10 @@ struct TrackerParams {
     double   leg_track_max_width_mm        = 300.0;  // 다리 후보 최대 폭
     double   leg_track_min_move_mm         = 20.0;   // 다리 후보 최소 프레임 이동량
     uint32_t leg_track_min_age             = 3;      // 다리 후보 최소 생존 프레임
-    double   person_group_pair_radius_mm   = 600.0;  // 다리쌍 그룹화 최대 거리
     double   person_group_new_pair_max_width_mm = 650.0; // 신규 다리쌍 생성 최대 폭
     double   person_group_wide_pair_radius_mm = 1500.0; // 좁은 leg 전용 넓은 보폭 생성 거리
     double   person_group_wide_pair_leg_width_mm = 260.0; // 넓은 보폭 허용 시 각 leg 최대 폭
     double   person_group_wide_pair_max_depth_gap_mm = 500.0; // 넓은 보폭 신규 pair 허용 Y축 최대 차이
-    double   person_group_max_width_mm     = 700.0;  // 기존 사람 그룹 표시/유지 최대 폭
     uint32_t person_group_hold_frames      = 18;     // 일시적 보폭/속도 흔들림 시 group 유지 프레임
     uint32_t person_group_wide_pair_birth_gap_frames = 6; // 넓은 보폭 leg 생성 시점 허용 차이
     double   object_candidate_max_width_mm = 250.0;  // 정지 소형 객체 후보 최대 폭
@@ -431,8 +426,6 @@ private:
 
     // -- Hotspot (과거 투기 위치, TTL 기반) --
     std::vector<HotspotEntry> hotspot_positions_;
-
-    bool IsInHotspot(double x, double y) const;
 
     // 삭제된 일반 트랙의 최근 위치 버퍼 (오인식 방지용)
     std::vector<DeletedTrackPos> deleted_positions_;

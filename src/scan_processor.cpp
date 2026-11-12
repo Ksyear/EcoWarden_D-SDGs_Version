@@ -135,7 +135,6 @@ void ScanProcessor::LearnStaticBackground(const ScanFrame& raw,
             if (blocked) continue;
         }
 
-        static_bg_prev_depth_[idx] = static_bg_depth_[idx];
         if (static_bg_depth_[idx] == 0) {
             static_bg_depth_[idx] = pt.distance_mm;
         } else {
@@ -177,14 +176,7 @@ void ScanProcessor::FilterStaticBackground(const ScanFrame& raw, ScanFrame& filt
         // 측정 거리가 배경보다 멀리 측정되면 = 유리창 반사 등의 노이즈
         if (pt.distance_mm < bg_dist) {
             if ((bg_dist - pt.distance_mm) > filter_.static_bg_margin_mm) {
-                const uint16_t prev = static_bg_prev_depth_[idx];
-                const bool jump_once =
-                    prev > 0 &&
-                    std::abs(static_cast<int>(pt.distance_mm) -
-                             static_cast<int>(prev)) >
-                        static_cast<int>(filter_.static_bg_jump_reject_mm) &&
-                    !HasStaticForegroundNeighbor(idx, pt.distance_mm);
-                if (jump_once) continue;
+                // 좌우 슬롯도 전경이어야 통과 — 단일 슬롯 순간 점프(edge spike)를 거른다
                 if (!HasStaticForegroundNeighbor(idx, pt.distance_mm)) continue;
                 filtered.push_back(pt);
             }

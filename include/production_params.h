@@ -80,7 +80,6 @@ inline FilterParams DefaultFilterParams() {
         EnvU32("ECOWARDEN_STATIC_BG_MIN_CONFIDENCE", 10));
     fp.static_bg_edge_guard_slots = static_cast<uint8_t>(
         EnvU32("ECOWARDEN_STATIC_BG_EDGE_GUARD_SLOTS", 1));
-    fp.static_bg_jump_reject_mm = EnvU32("ECOWARDEN_STATIC_BG_JUMP_REJECT_MM", 500);
     fp.reverse_angle = EnvBool("ECOWARDEN_REVERSE_LIDAR_ANGLE", true);
     return fp;
 }

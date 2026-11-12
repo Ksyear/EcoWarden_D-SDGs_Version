@@ -21,6 +21,7 @@
 #include <sstream>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 namespace ecowarden {
 
@@ -109,6 +110,8 @@ struct ServoController::Impl {
         uint64_t last_capture_ms = 0;
         int last_zone = -1;
         uint32_t photo_count = 0;
+        // 투기 없이 세션이 끝나면 vault 원본까지 지우기 위한 사진 경로 목록
+        std::vector<std::string> photos;
     };
 
     explicit Impl(const ServoParams& p, CameraModule& cam)
@@ -140,6 +143,25 @@ struct ServoController::Impl {
         std::filesystem::create_directories(params.suspect_dir, ec);
         std::filesystem::create_directories(params.dump_dir, ec);
         std::filesystem::create_directories(params.person_dir, ec);
+
+        // 이전 실행이 비정상 종료되면 임시 사람 사진이 남는다. 트랙 ID 는
+        // 재시작 시 1부터 다시 매겨지므로, 남겨 두면 다른 사람의 증거 묶음에
+        // 섞인다. 임시 보관이 원칙이므로 시작할 때 비운다 (vault 원본 포함).
+        std::vector<std::filesystem::path> stale;
+        for (const auto& entry :
+             std::filesystem::directory_iterator(params.person_dir, ec)) {
+            if (entry.is_directory() &&
+                entry.path().filename().string().rfind("person_", 0) == 0) {
+                stale.push_back(entry.path());
+            }
+        }
+        for (const auto& dir : stale) {
+            for (const auto& photo :
+                 std::filesystem::directory_iterator(dir, ec)) {
+                camera.DiscardOriginal(photo.path().string());
+            }
+            std::filesystem::remove_all(dir, ec);
+        }
 
         if (params.enable) {
             if (params.backend == "arduino") {
@@ -465,6 +487,7 @@ struct ServoController::Impl {
                 it->second.last_capture_ms = now;
                 it->second.last_zone = zone;
                 it->second.photo_count++;
+                it->second.photos.push_back(saved);
             }
         }
     }
@@ -499,6 +522,10 @@ struct ServoController::Impl {
             const auto& session = it->second;
             if (session.last_seen_ms > 0 &&
                 now > session.last_seen_ms + params.person_session_timeout_ms) {
+                // 마스킹본만 지우면 vault 원본이 보존기한(기본 30일)까지 남는다.
+                for (const auto& photo : session.photos) {
+                    camera.DiscardOriginal(photo);
+                }
                 if (!session.dir.empty()) {
                     std::filesystem::remove_all(session.dir, ec);
                     ec.clear();

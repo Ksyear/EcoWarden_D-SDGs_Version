@@ -451,6 +451,17 @@ VaultSweepResult EvidenceVault::SweepExpired() {
     return r;
 }
 
+// ── 단건 파기 ────────────────────────────────────────────────────────
+bool EvidenceVault::Remove(const std::string& name) {
+    const std::string path =
+        (std::filesystem::path(params_.vault_dir) / (name + ".ewv")).string();
+    std::error_code ec;
+    if (!std::filesystem::remove(path, ec)) return false;
+    AppendAccessLog(IsoUtc(NowUnix()) + "\tpath=" + SanitizeField(path) +
+                    "\tactor=system\treason=no_event_discard\tresult=DELETED");
+    return true;
+}
+
 // ── 열람 로그 ────────────────────────────────────────────────────────
 void EvidenceVault::AppendAccessLog(const std::string& line) {
     if (params_.access_log.empty()) return;

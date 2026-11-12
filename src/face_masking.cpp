@@ -236,6 +236,30 @@ FaceMaskResult FaceMasker::Apply(void* frame_mat) {
 
     std::vector<cv::Rect> faces;
 
+    // 검출기가 없거나 추론이 실패했을 때의 공통 처리 (fail-closed).
+    //   추론 예외를 "얼굴 0개"로 넘기면 원본이 그대로 나간다.
+    const auto without_detector = [&]() -> FaceMaskResult {
+        if (!params_.require_detector) {
+            r.safe_to_emit = true;   // 운영자가 명시적으로 허용
+            return r;
+        }
+        if (params_.fallback_mask_upper) {
+            const int h = static_cast<int>(
+                frame.rows * std::clamp(params_.fallback_upper_ratio, 0.1, 1.0));
+            const cv::Rect roi(0, 0, frame.cols, h);
+            MaskRoi(frame, roi, params_);
+            r.applied       = true;
+            r.used_fallback = true;
+            r.safe_to_emit  = true;
+            r.backend       = "fallback";
+            r.boxes.push_back({0, roi.x, roi.y, roi.width, roi.height});
+            return r;
+        }
+        r.safe_to_emit = false;      // 폴백조차 꺼져 있으면 내보내지 않는다
+        return r;
+    };
+    bool detector_failed = false;
+
 #ifdef HAVE_OPENCV_DNN
     if (impl_->net_ok) {
         try {
@@ -260,7 +284,7 @@ FaceMaskResult FaceMasker::Apply(void* frame_mat) {
             }
         } catch (const cv::Exception& e) {
             std::cerr << "[FACEMASK] DNN 추론 실패: " << e.what() << "\n";
-            faces.clear();
+            detector_failed = true;
         }
     } else
 #endif
@@ -288,7 +312,7 @@ FaceMaskResult FaceMasker::Apply(void* frame_mat) {
                 cv::Size(min_px, min_px));
         } catch (const cv::Exception& e) {
             std::cerr << "[FACEMASK] Haar 검출 실패: " << e.what() << "\n";
-            faces.clear();
+            detector_failed = true;
         }
         if (inv != 1.0) {
             for (cv::Rect& f : faces) {
@@ -299,27 +323,9 @@ FaceMaskResult FaceMasker::Apply(void* frame_mat) {
             }
         }
     } else {
-        // ── fail-closed 경로 ─────────────────────────────────────────
-        if (!params_.require_detector) {
-            r.safe_to_emit = true;   // 운영자가 명시적으로 허용
-            return r;
-        }
-        if (params_.fallback_mask_upper) {
-            const int h = static_cast<int>(
-                frame.rows * std::clamp(params_.fallback_upper_ratio, 0.1, 1.0));
-            const cv::Rect roi(0, 0, frame.cols, h);
-            MaskRoi(frame, roi, params_);
-            r.applied       = true;
-            r.used_fallback = true;
-            r.safe_to_emit  = true;
-            r.backend       = "fallback";
-            r.boxes.push_back({0, roi.x, roi.y, roi.width, roi.height});
-            return r;
-        }
-        // 폴백조차 꺼져 있으면 내보내지 않는다.
-        r.safe_to_emit = false;
-        return r;
+        return without_detector();   // 검출기 없음
     }
+    if (detector_failed) return without_detector();
 
     // 번호가 프레임마다 흔들리지 않도록 화면 왼쪽부터 정렬해 매긴다.
     std::sort(faces.begin(), faces.end(),

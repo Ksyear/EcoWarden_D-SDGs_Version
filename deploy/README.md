@@ -11,6 +11,11 @@ v5 에서 신설. 이전에는 `.service` 파일이 레포에 0 개였고, "`ECO
 
 ## systemd 설치
 
+0. 서비스 계정 생성 (최초 1회). LiDAR·Arduino(`dialout`), 카메라(`video`),
+   PIR(`gpio`) 그룹에 넣지 않으면 장치를 열지 못한다 (`gpio` 그룹은 `setup.sh` 가 만든다).
+   ```
+   sudo useradd -r -s /usr/sbin/nologin -G dialout,video,gpio ecowarden
+   ```
 1. 바이너리를 `/opt/ecowarden/` 로 복사하고 소유자를 `ecowarden` 으로.
    ```
    sudo install -d -o ecowarden /opt/ecowarden /opt/ecowarden/captures /var/log/ecowarden

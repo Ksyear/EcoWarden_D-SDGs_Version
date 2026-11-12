@@ -53,17 +53,6 @@ uint64_t ClusterTracker::NowMs() { return ecowarden::NowMs(); }
 ClusterTracker::ClusterTracker(const TrackerParams& params)
     : params_(params) {}
 
-// -- Hotspot 반경 내 여부 검사 --
-bool ClusterTracker::IsInHotspot(double x, double y) const {
-    const double r_sq = params_.hotspot_radius_mm * params_.hotspot_radius_mm;
-    for (const auto& hp : hotspot_positions_) {
-        double dx = x - hp.x_mm;
-        double dy = y - hp.y_mm;
-        if (dx * dx + dy * dy < r_sq) return true;
-    }
-    return false;
-}
-
 // ── 콜백 등록 ───────────────────────────────────────────────────────
 void ClusterTracker::SetDepartureCallback(DepartureCallback cb) {
     dep_callback_ = std::move(cb);
@@ -683,8 +672,6 @@ void ClusterTracker::Update(const std::vector<Cluster>& clusters,
             tr.width_drop_detected = true;
             tr.width_drop_x_mm     = tr.prev_x_mm;
             tr.width_drop_y_mm     = tr.prev_y_mm;
-        } else {
-            tr.prev_width_mm = tr.width_mm;
         }
 
         tr.lost_count = 0;

@@ -120,6 +120,21 @@ void CameraModule::SetEvidenceVault(EvidenceVault* vault) {
     evidence_vault_ = vault;
 }
 
+// 증거 사진 경로 → vault 파일명 베이스.
+//   "captures/dumps/<evt>/confirm.jpg" → "<evt>_confirm"
+//   파일명만 쓰면 모든 투기의 confirm 원본이 confirm.ewv 하나로 덮어써진다.
+static std::string VaultNameFor(const std::string& image_path) {
+    const std::filesystem::path p(image_path);
+    const std::string parent = p.parent_path().filename().string();
+    return parent.empty() ? p.stem().string()
+                          : parent + "_" + p.stem().string();
+}
+
+void CameraModule::DiscardOriginal(const std::string& image_path) {
+    if (evidence_vault_ == nullptr || image_path.empty()) return;
+    evidence_vault_->Remove(VaultNameFor(image_path));
+}
+
 // ── 증거 프레임 공통 전처리 (원본 보관 → 마스킹) ────────────────────
 //
 //   순서가 중요하다:
@@ -151,10 +166,16 @@ bool CameraModule::PrepareEvidenceFrame(void* frame_mat,
     }
 
     // ② 얼굴 마스킹 (프라이버시 2계층)
-    if (!face_masker_) {
-        face_masker_ = std::make_unique<FaceMasker>(face_mask_params_);
+    //   메인 루프(CaptureBase64·확정 사진)와 서보 worker(사람·의심 사진)가
+    //   동시에 들어온다. 검출기는 스레드 안전하지 않으므로 직렬화한다.
+    FaceMaskResult mr;
+    {
+        std::lock_guard<std::mutex> lock(face_mask_mutex_);
+        if (!face_masker_) {
+            face_masker_ = std::make_unique<FaceMasker>(face_mask_params_);
+        }
+        mr = face_masker_->Apply(&frame);
     }
-    const FaceMaskResult mr = face_masker_->Apply(&frame);
     if (out_mask) *out_mask = mr;
     if (!mr.safe_to_emit) {
         std::cerr << "[FACEMASK] fail-closed — 마스킹 불가로 증거 사진 저장을 "
@@ -407,15 +428,20 @@ void CameraModule::BlackboxSaveWorker(std::string path, int64_t event_ms,
     //   그래서 **디스크에 쓰기 직전인 여기서** 프레임마다 마스킹한다.
     //   원본 JPEG 는 메모리에만 존재하고 파일로 남지 않는다.
     //
-    //   검출기는 스레드 안전하지 않으므로 이 worker 전용 인스턴스를 쓴다
-    //   (사진 경로의 face_masker_ 와 동시 호출될 수 있음).
-    if (!blackbox_masker_) {
-        blackbox_masker_ = std::make_unique<FaceMasker>(face_mask_params_);
-    }
+    //   검출기는 스레드 안전하지 않으므로 블랙박스 전용 인스턴스를 쓴다
+    //   (사진 경로의 face_masker_ 와 동시 호출될 수 있음). 동시 저장
+    //   (max_concurrent_saves > 1) 시 worker 끼리도 겹치므로 직렬화한다.
+    const auto mask_frame = [this](cv::Mat* m) {
+        std::lock_guard<std::mutex> lock(blackbox_mask_mutex_);
+        if (!blackbox_masker_) {
+            blackbox_masker_ = std::make_unique<FaceMasker>(face_mask_params_);
+        }
+        return blackbox_masker_->Apply(m);
+    };
     {
         // fail-closed: 마스킹이 요구됐는데 불가능하면 영상을 저장하지 않는다.
         cv::Mat probe = first.clone();
-        const FaceMaskResult pr = blackbox_masker_->Apply(&probe);
+        const FaceMaskResult pr = mask_frame(&probe);
         if (!pr.safe_to_emit) {
             std::cerr << "[FACEMASK] fail-closed — 마스킹 불가로 블랙박스 영상 "
                          "저장을 건너뜁니다 (" << path << ")\n";
@@ -464,7 +490,7 @@ void CameraModule::BlackboxSaveWorker(std::string path, int64_t event_ms,
         if (img.empty()) continue;
         if (img.size() != first.size()) cv::resize(img, img, first.size());
 
-        const FaceMaskResult mr = blackbox_masker_->Apply(&img);
+        const FaceMaskResult mr = mask_frame(&img);
         if (!mr.safe_to_emit) continue;   // 이 프레임은 버린다
         if (mr.applied) { masked_frames++; masked_faces += mr.faces; }
 
@@ -590,9 +616,7 @@ std::string CameraModule::CaptureToFilePath(const std::string& path,
     // ★ 원본 vault 보관 + 얼굴 마스킹은 배너를 그리기 전에 끝낸다.
     //   (마스킹을 나중에 하면 ID 라벨까지 블러 처리된다)
     FaceMaskResult mask_info;
-    if (!PrepareEvidenceFrame(&frame,
-                              std::filesystem::path(path).stem().string(),
-                              &mask_info)) {
+    if (!PrepareEvidenceFrame(&frame, VaultNameFor(path), &mask_info)) {
         return "";
     }
 

@@ -1804,6 +1804,9 @@ static bool RunEvidenceVaultUnitTest() {
                        "★보존기한 경과 시 만료 판정");
                 const auto sweep = v2.SweepExpired();
                 expect(sweep.scanned >= 1, "sweep 이 파일을 검사함");
+                // 단건 파기 — 이벤트 없이 지나간 행인의 원본을 지우는 경로
+                expect(v2.Remove("expire_me"), "★Remove 가 원본을 즉시 파기");
+                expect(!v2.Remove("expire_me"), "없는 원본 Remove 는 false");
             }
         }
     }

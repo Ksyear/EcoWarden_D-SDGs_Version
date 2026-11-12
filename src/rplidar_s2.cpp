@@ -131,21 +131,8 @@ Error RplidarS2::GetScanFrame(ScanFrame& frame) {
     return Error::None;
 }
 
-bool RplidarS2::GetScanFrequency(double& hz) {
-    if (!running_ || !driver_) return false;
-    
-    // Simplified frequency check
-    hz = 10.0; // RPLiDAR S2 default
-    return true;
-}
-
 bool RplidarS2::IsRunning() const {
     return running_;
-}
-
-uint64_t RplidarS2::GetTimestampNs() {
-    auto now = std::chrono::high_resolution_clock::now();
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
 }
 
 } // namespace ecowarden

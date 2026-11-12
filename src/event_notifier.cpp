@@ -134,7 +134,7 @@ EventNotifier::~EventNotifier() {
     // (여러 EventNotifier 인스턴스 생성 가능성 대비)
 }
 
-// NowMs / MsToIso8601 / MsToApiTime 은 time_utils.h 의 free function 사용.
+// NowMs / MsToIso8601 은 time_utils.h 의 free function 사용.
 // ── EventNotifier::MsToIso8601 (legacy static member) ─── 호환용 wrapper
 std::string EventNotifier::MsToIso8601(uint64_t epoch_ms) {
     return ecowarden::MsToIso8601(epoch_ms);

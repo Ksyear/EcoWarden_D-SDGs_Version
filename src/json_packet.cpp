@@ -21,30 +21,7 @@ namespace ecowarden {
 
 JsonPacketSender::JsonPacketSender(UdpSender& udp) : udp_(udp) {}
 
-std::string JsonPacketSender::MsToIso8601(uint64_t epoch_ms) {
-    return ecowarden::MsToIso8601(epoch_ms);
-}
 uint64_t JsonPacketSender::NowMs() { return ecowarden::NowMs(); }
-
-std::string JsonPacketSender::ResolveType(const Cluster& cluster,
-                                          const std::vector<Track>& tracks) {
-    if (tracks.empty()) return "normal";
-    double best_sq = 1e18;
-    TrackState best_state = TrackState::Moving;
-    bool is_dumped = false;
-    for (const auto& tr : tracks) {
-        double dx = cluster.centroid_x_mm - tr.x_mm;
-        double dy = cluster.centroid_y_mm - tr.y_mm;
-        double d2 = dx * dx + dy * dy;
-        if (d2 < best_sq) {
-            best_sq = d2;
-            best_state = tr.state;
-            is_dumped = tr.is_dumped_item;
-        }
-    }
-    if (is_dumped) return "dumped";
-    return (best_state == TrackState::Departed) ? "abandoned" : "normal";
-}
 
 std::string JsonPacketSender::Serialize(
     const std::vector<Cluster>& clusters,
@@ -354,13 +331,12 @@ bool JsonPacketSender::Send(const std::vector<Cluster>& clusters,
     }
 
     std::string payload = Serialize(clusters, tracks, dep_with_pending, dump_with_pending, frame_id, tracked_only, intr_with_pending);
-    if (payload.size() <= UDP_MAX_DGRAM) {
-        if (udp_.SendBuffer(payload.data(), payload.size())) {
-            sent_count_++;
-            return true;
-        }
-        return false;
+    if (payload.size() <= UDP_MAX_DGRAM &&
+        udp_.SendBuffer(payload.data(), payload.size())) {
+        sent_count_++;
+        return true;
     }
+    drop_count_++;   // 크기 초과 또는 전송 실패
     return false;
 }
 

@@ -52,17 +52,4 @@ inline std::string MsToIso8601(uint64_t epoch_ms) {
     return buf;
 }
 
-// epoch milliseconds → "YYYY-MM-DD HH:MM:SS" UTC (API payload 전용).
-inline std::string MsToApiTime(uint64_t epoch_ms) {
-    time_t sec = static_cast<time_t>(epoch_ms / 1000);
-    struct tm utc{};
-    gmtime_r(&sec, &utc);
-
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
-                  utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday,
-                  utc.tm_hour, utc.tm_min, utc.tm_sec);
-    return buf;
-}
-
 } // namespace ecowarden

@@ -86,11 +86,6 @@ public:
     Error GetScanFrame(ScanFrame& frame);
 
     /**
-     * @brief 현재 스캔 주파수(Hz)를 반환한다.
-     */
-    bool GetScanFrequency(double& hz);
-
-    /**
      * @brief 센서가 정상 동작 중인지 확인한다.
      */
     bool IsRunning() const;
@@ -99,8 +94,6 @@ private:
     sl::ILidarDriver*  driver_ = nullptr;
     std::atomic<bool>  running_{false};
     Config             cfg_;
-
-    static uint64_t GetTimestampNs();
 };
 
 } // namespace ecowarden
