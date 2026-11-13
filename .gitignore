@@ -1,0 +1,100 @@
+# ═══════════════════════════════════════════════════════════════════════
+# 코드 분류 기준 (커밋 대상 — ignore 아님, 참고용)
+#
+# [운영 코드] 보안 감시 시스템 실행에 사용:
+#   src/                  전체 소스 (main, cluster_tracker, zone_policy 판정,
+#                         servo_controller, camera_module, event_notifier,
+#                         json_packet, udp_sender, pir_sensor, ...)
+#   include/              전체 헤더 (zone_policy.h 침입 판정, dump_detector.h 확장 등)
+#   CMakeLists.txt        빌드 구성
+#   setup.sh              Pi 초기 설정 자동화
+#   deploy/               systemd 상시 운영 (ecowarden.service)
+#   arduino/              서보 백엔드 스케치 (1회 업로드)
+#
+# [운영 보조 도구] 디버그/점검용 (커밋 대상):
+#   lidar_visualizer.py   실시간 시각화 + 수신 데이터 값 패널 (d키)
+#   test_fastapi.py       FastAPI 서버 연결 점검 (dumping/intrusion)
+#   check_hardware.sh     하드웨어 일괄 점검
+#
+# [테스트 코드] 제품 바이너리(rplidar_app)에 포함되지 않음.
+#   CMake가 타깃으로 참조하므로 삭제 금지 (커밋 대상):
+#   test/sim_main.cpp         rplidar_sim — 회귀 시나리오 28종 + 단위 테스트 5종
+#   test/test_camera.cpp      check_camera — USB 카메라
+#   test/test_lidar.cpp       check_lidar — RPLiDAR S2 연결
+#   test/test_pir.cpp         check_pir — PIR GPIO 17/27
+#   test/servo_sweep_test.cpp servo_sweep_test — 5-zone sweep + 촬영
+#   test/servo_only_test.cpp  servo_only_test — Pi5 단독 PWM 진단
+#
+# 아래 항목만 git에서 제외한다.
+# ═══════════════════════════════════════════════════════════════════════
+
+# ── Build (생성물 — 빌드 시 자동 생성) ─────────────────────────────────
+build/
+build-*/
+cmake-build-*/
+
+# ── Third-party ───────────────────────────────────────────────────────
+# thirdparty/rplidar_sdk 는 이미 커밋되어 추적 중 (오프라인 빌드 보장).
+# 추적을 해제하려면: git rm -r --cached thirdparty/ 후 아래 주석 해제.
+# thirdparty/
+
+# ── IDE / Editor ──────────────────────────────────────────────────────
+.vscode/
+.idea/
+.obsidian/
+*.swp
+*.swo
+*~
+
+# ── macOS ─────────────────────────────────────────────────────────────
+.DS_Store
+._*
+
+# ── Compiled objects ──────────────────────────────────────────────────
+*.o
+*.a
+*.so
+*.dylib
+*.out
+
+# ── CMake generated ───────────────────────────────────────────────────
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+_deps/
+
+# ── Python ────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+
+# ── 런타임 산출물 (증거 사진/영상/블랙박스 — 실행 시 자동 생성) ────────
+captures/
+captures_test/
+
+# ── 증거 원본·비밀값 (v56) — 절대 커밋 금지 ───────────────────────────
+#   captures/ 가 이미 vault 를 덮지만, 경로를 바꿔 운영하는 경우를 대비해
+#   확장자·이름 기준으로도 막는다.
+*.ewv
+vault/
+access.log
+secrets.conf
+*.key
+
+# ── 다운로드 모델 파일 (setup.sh 가 받음, 수 MB~수십 MB) ──────────────
+models/
+
+# ── Misc ──────────────────────────────────────────────────────────────
+*.log
+*.tmp
+
+# ── 레거시 / 독립 도구 (수정필요.md §5 "삭제해도 지장 없음" 분류) ──────
+camera_viewer/
+embedded/
+notion.md
+Result_Report.md
+plan.md
+technotes/
+SKILL.md
+learning/
